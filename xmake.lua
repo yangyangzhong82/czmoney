@@ -10,7 +10,8 @@ if is_config("target_type", "server") then
 else
     add_requires("levilamina", {configs = {target_type = "client"}})
 end
-
+add_requires("sqlitecpp")
+add_requires("mysql")
 add_requires("levibuildscript")
 
 if not has_config("vs_runtime") then
@@ -28,7 +29,7 @@ target("my-mod") -- Change this to your mod name.
     add_rules("@levibuildscript/modpacker")
     add_cxflags( "/EHa", "/utf-8", "/W4", "/w44265", "/w44289", "/w44296", "/w45263", "/w44738", "/w45204")
     add_defines("NOMINMAX", "UNICODE")
-    add_packages("levilamina")
+    add_packages("levilamina","sqlitecpp","mysql")
     set_exceptions("none") -- To avoid conflicts with /EHa.
     set_kind("shared")
     set_languages("c++20")

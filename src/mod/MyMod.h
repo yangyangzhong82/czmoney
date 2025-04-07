@@ -1,7 +1,8 @@
 #pragma once
 
 #include "ll/api/mod/NativeMod.h"
-
+#include "mod/mysql.h" // 包含 MySQL 连接头文件
+#include <memory>      // 为了 std::unique_ptr
 namespace my_mod {
 
 class MyMod {
@@ -28,6 +29,7 @@ public:
 
 private:
     ll::mod::NativeMod& mSelf;
+    std::unique_ptr<db::MySQLConnection> mDbConnection; // 数据库连接指针
 };
 
 } // namespace my_mod
