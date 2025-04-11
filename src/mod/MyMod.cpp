@@ -1,9 +1,10 @@
 #include "mod/MyMod.h"
-// #include <sqlite3.h> // 如果不再使用 SQLite，可以移除
 #include "ll/api/mod/RegisterHelper.h"
-// #include <mysql.h> // mysql.h 已被 mysql.cpp 包含，这里不需要重复包含
-#include "ll/api/io/Logger.h" // 修正 Logger 引入路径
-#include <stdexcept>          // 为了 std::runtime_error (如果使用异常)
+#include "ll/api/io/Logger.h"
+#include "ll/api/Config.h" // 包含配置 API 头文件
+#include <stdexcept>
+#include <filesystem> // 确保包含 filesystem
+
 namespace my_mod {
 
 MyMod& MyMod::getInstance() {
@@ -12,8 +13,29 @@ MyMod& MyMod::getInstance() {
 }
 
 bool MyMod::load() {
-    getSelf().getLogger().debug("Loading...");
-    // Code for loading the mod goes here.
+    auto& logger = getSelf().getLogger();
+    logger.debug("Loading...");
+
+    //加载配置
+    mConfigPath = getSelf().getConfigDir() / "config.json";
+    logger.info("Configuration path: {}", mConfigPath.string());
+
+
+    try {
+        ll::config::loadConfig(getConfig(), mConfigPath);
+        logger.info("Configuration loaded/updated.");
+    } catch (const std::exception& e) {
+        logger.error("Failed to load configuration: {}. Using default values.", e.what());
+    } catch (...) {
+        logger.error("Failed to load configuration due to an unknown error. Using default values.");
+    }
+
+    // 始终保存配置，确保文件存在且格式正确
+    if (!ll::config::saveConfig(getConfig(), mConfigPath)) {
+        logger.error("Failed to save configuration file!");
+        // return false;
+    }
+
     return true;
 }
 
@@ -21,21 +43,19 @@ bool MyMod::enable() {
     auto& logger = getSelf().getLogger();
     logger.debug("Enabling...");
 
-    // --- 数据库连接 ---
-    // TODO: 从配置文件读取数据库连接信息
-    const std::string db_host = "127.0.0.1";
-    const std::string db_user = "your_username";
-    const std::string db_password = "your_password";
-    const std::string db_name = "your_database";
-    const unsigned int db_port = 3306;
-
+    // --- 数据库连接 (使用配置) ---
     try {
+        // 使用 getConfig() 获取配置
+        const auto& cfg = getConfig();
+        logger.info("Database configuration: host={}, user={}, db={}, port={}",
+                    cfg.db_host, cfg.db_user, cfg.db_name, cfg.db_port);
+
         mDbConnection = std::make_unique<db::MySQLConnection>(
-            db_host,
-            db_user,
-            db_password,
-            db_name,
-            db_port
+            cfg.db_host,
+            cfg.db_user,
+            cfg.db_password, // 注意：密码通常不应记录在日志中
+            cfg.db_name,
+            cfg.db_port
         );
 
         logger.info("Connecting to database...");

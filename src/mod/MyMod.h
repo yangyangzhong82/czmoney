@@ -2,7 +2,10 @@
 
 #include "ll/api/mod/NativeMod.h"
 #include "mod/mysql.h" // 包含 MySQL 连接头文件
+#include "mod/config.h" 
 #include <memory>      // 为了 std::unique_ptr
+#include <filesystem> // 为了 std::filesystem
+
 namespace my_mod {
 
 class MyMod {
@@ -27,9 +30,14 @@ public:
     // /// @return True if the mod is unloaded successfully.
     // bool unload();
 
+    /// @return A reference to the loaded configuration.
+    [[nodiscard]] Config& getConfig() { return mConfig; }
+
 private:
     ll::mod::NativeMod& mSelf;
     std::unique_ptr<db::MySQLConnection> mDbConnection; // 数据库连接指针
+    Config mConfig; // 存储加载的配置
+    std::filesystem::path mConfigPath; // 配置文件路径
 };
 
 } // namespace my_mod
