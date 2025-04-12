@@ -4,15 +4,17 @@
 #include <cstdint>     // 使用 int64_t 等固定宽度整数类型
 #include <optional>    // 使用 std::optional 表示可能不存在的值
 #include "ll/api/io/Logger.h" // 引入 LeviLamina 的日志记录器
+#include "mod/config.h" // 包含配置文件头文件
 
 // 前向声明 (Forward declaration)
-// 告诉编译器 db::MySQLConnection 类存在，但不需要其完整定义
 // 这样可以避免在头文件中包含 mysql.h，减少编译依赖
 namespace db {
 class MySQLConnection;
 }
 
 namespace my_mod {
+
+// Config 结构体已包含
 
 /**
  * @brief 管理玩家货币数据的类
@@ -25,8 +27,9 @@ public:
     /**
      * @brief 构造函数
      * @param dbConn 一个有效的数据库连接对象的引用
+     * @param config 配置对象的引用，用于获取初始余额等设置
      */
-    explicit MoneyManager(db::MySQLConnection& dbConn);
+    explicit MoneyManager(db::MySQLConnection& dbConn, const Config& config); // 修改构造函数签名
 
     // 禁用拷贝构造函数和拷贝赋值运算符，防止意外复制
     MoneyManager(const MoneyManager&) = delete;
@@ -49,14 +52,26 @@ public:
     bool hasAccount(const std::string& uuid, const std::string& currencyType);
 
     /**
-     * @brief 获取玩家指定货币类型的余额
+     * @brief 获取玩家指定货币类型的余额 (不初始化)
      *
      * 余额以整数形式返回，该值是实际金额乘以 100。
+     * 如果账户不存在，此函数 *不会* 自动初始化账户。
      * @param uuid 玩家的 UUID
      * @param currencyType 货币类型
      * @return std::optional<int64_t> 如果账户存在，返回余额；否则返回 std::nullopt
      */
     std::optional<int64_t> getPlayerBalance(const std::string& uuid, const std::string& currencyType);
+
+    /**
+     * @brief 获取玩家指定货币类型的余额，如果不存在则根据配置初始化
+     *
+     * 余额以整数形式返回，该值是实际金额乘以 100。
+     * @param uuid 玩家的 UUID
+     * @param currencyType 货币类型
+     * @return int64_t 返回玩家的余额。如果账户不存在，会先初始化再返回初始值。
+     * @throws std::runtime_error 如果数据库操作失败或无法获取初始值。
+     */
+    int64_t getPlayerBalanceOrInit(const std::string& uuid, const std::string& currencyType);
 
     /**
      * @brief 设置玩家指定货币类型的余额
@@ -72,7 +87,7 @@ public:
     /**
      * @brief 增加玩家指定货币类型的余额
      *
-     * 如果账户不存在，将自动创建并将余额设置为 amountToAdd。
+     * 如果账户不存在，将根据配置自动创建账户并设置初始值，然后在此基础上增加。
      * @param uuid 玩家的 UUID
      * @param currencyType 货币类型
      * @param amountToAdd 要增加的金额 (整数，实际金额乘以 100)
@@ -83,7 +98,7 @@ public:
     /**
      * @brief 减少玩家指定货币类型的余额
      *
-     * 如果账户不存在或余额不足，操作将失败。
+     * 如果账户不存在或余额不足，操作将失败。此操作 *不会* 初始化账户。
      * @param uuid 玩家的 UUID
      * @param currencyType 货币类型
      * @param amountToSubtract 要减少的金额 (整数，实际金额乘以 100)
@@ -113,11 +128,28 @@ public:
 
 private:
     db::MySQLConnection& mDbConnection; // 持有数据库连接的引用
+    const Config& mConfig;             // 持有配置对象的引用 (新增)
     ll::io::Logger& mLogger;           // 持有日志记录器的引用
 
-    // 可以在这里添加私有辅助函数，例如：
-    // - 执行预处理语句 (prepare statement) 的函数
-    // - 检查数据库错误的函数
+    /**
+     * @brief 检查指定的货币类型是否在配置中定义 (私有辅助函数)
+     * @param currencyType 要检查的货币类型
+     * @return bool 如果已配置则返回 true，否则返回 false
+     */
+    bool isCurrencyConfigured(const std::string& currencyType) const;
+
+    /**
+     * @brief 初始化指定玩家和货币类型的账户 (私有辅助函数)
+     *
+     * 根据配置文件中的 initialBalances 设置初始值。
+     * 如果配置文件中没有对应的 currencyType，则默认为 0。
+     * @param uuid 玩家的 UUID
+     * @param currencyType 货币类型
+     * @return std::optional<int64_t> 如果初始化成功，返回初始化的余额；否则返回 std::nullopt
+     */
+    std::optional<int64_t> initializeAccount(const std::string& uuid, const std::string& currencyType);
+
+    // 可以在这里添加其他私有辅助函数
 };
 
 } // namespace my_mod

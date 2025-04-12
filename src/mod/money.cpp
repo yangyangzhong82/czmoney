@@ -1,15 +1,17 @@
 #include "mod/money.h"
 #include "mod/mysql.h"
-#include "ll/api/mod/NativeMod.h" 
-#include "ll/api/memory/Hook.h"  
+#include "ll/api/mod/NativeMod.h"
+#include "ll/api/memory/Hook.h"
 #include <mysql.h>
 #include <stdexcept>
 #include <vector>
 #include <string>
 #include <sstream>
 #include <iomanip>
-#include <limits> 
-#include <cmath> 
+#include <limits>
+#include <cmath>
+#include <utility> // For std::move
+
 namespace my_mod {
 
 // RAII (Resource Acquisition Is Initialization) 辅助类，用于自动管理 MYSQL_STMT 的生命周期
@@ -29,11 +31,11 @@ public:
     StatementGuard(const StatementGuard&) = delete;
     // 禁用拷贝赋值运算符
     StatementGuard& operator=(const StatementGuard&) = delete;
-    // 允许移动构造函数 
+    // 允许移动构造函数
     StatementGuard(StatementGuard&& other) noexcept : mStmt(other.mStmt) {
         other.mStmt = nullptr; // 将源对象的指针置空，防止重复释放
     }
-    // 允许移动赋值运算符 
+    // 允许移动赋值运算符
     StatementGuard& operator=(StatementGuard&& other) noexcept {
         if (this != &other) { // 防止自赋值
             if (mStmt) mysql_stmt_close(mStmt); // 释放当前持有的资源
@@ -74,11 +76,19 @@ public:
     }
 };
 
+// --- 私有辅助函数实现 ---
 
-// MoneyManager 构造函数实现
-MoneyManager::MoneyManager(db::MySQLConnection& dbConn) :
+// 检查货币类型是否已配置
+bool MoneyManager::isCurrencyConfigured(const std::string& currencyType) const {
+    return mConfig.economy.count(currencyType) > 0;
+}
+
+
+// MoneyManager 构造函数实现 (更新)
+MoneyManager::MoneyManager(db::MySQLConnection& dbConn, const Config& config) : // 添加 config 参数
     mDbConnection(dbConn), // 初始化数据库连接引用成员
-    mLogger(ll::mod::NativeMod::current()->getLogger()) // 初始化日志记录器引用成员，通过 NativeMod 获取当前 Mod 的 Logger
+    mConfig(config),       // 初始化配置引用成员 (新增)
+    mLogger(ll::mod::NativeMod::current()->getLogger()) // 初始化日志记录器引用成员
 {
     // 构造时检查数据库连接状态
     if (!mDbConnection.isConnected()) {
@@ -136,7 +146,7 @@ bool MoneyManager::hasAccount(const std::string& uuid, const std::string& curren
 }
 
 
-// 获取玩家余额的实现
+// 获取玩家余额的实现 (不初始化)
 std::optional<int64_t> MoneyManager::getPlayerBalance(const std::string& uuid, const std::string& currencyType) {
     // 检查数据库连接
     if (!mDbConnection.isConnected()) {
@@ -202,8 +212,8 @@ std::optional<int64_t> MoneyManager::getPlayerBalance(const std::string& uuid, c
     // 绑定第一个结果列：amount (长整型)
     results[0].buffer_type = MYSQL_TYPE_LONGLONG; // 结果类型：对应 BIGINT
     results[0].buffer = &balance; // 指向存储结果的变量
-    results[0].is_null = &is_null; // 指向 NULL 标志变量 (恢复直接赋值 bool*)
-    results[0].error = &error;     // 指向错误标志变量 (恢复直接赋值 bool*)
+    results[0].is_null = &is_null; // 指向 NULL 标志变量
+    results[0].error = &error;     // 指向错误标志变量
 
     // 将结果绑定到语句句柄
     if (mysql_stmt_bind_result(stmt, results)) {
@@ -238,14 +248,74 @@ std::optional<int64_t> MoneyManager::getPlayerBalance(const std::string& uuid, c
     }
 }
 
+// 新增：初始化账户的私有辅助函数实现
+std::optional<int64_t> MoneyManager::initializeAccount(const std::string& uuid, const std::string& currencyType) {
+    // 0. 检查货币类型是否已配置
+    if (!isCurrencyConfigured(currencyType)) {
+        mLogger.error("无法初始化账户：货币类型 '{}' 未在配置中定义。", currencyType);
+        return std::nullopt; // 返回空 optional 表示失败
+    }
+
+    // 1. 从配置中获取初始余额
+    int64_t initialAmount = 0; // 默认初始值为 0
+    auto it = mConfig.economy.find(currencyType); // 从新的 economy map 中查找
+    if (it != mConfig.economy.end()) {
+        // 找到了对应货币类型的配置
+        initialAmount = it->second.initialBalance; // 获取 CurrencyConfig 中的 initialBalance
+    } else {
+        // 未找到特定货币类型的配置，使用默认值 0
+        mLogger.warn("未在配置的 'economy' 部分找到货币类型 '{}' 的设置，将使用默认初始余额 0。", currencyType);
+        // 注意：这里也可以选择从一个全局默认值读取，如果 Config 结构体未来添加了类似 defaultInitialBalance 的字段
+    }
+
+    // 2. 使用 setPlayerBalance 插入新记录
+    mLogger.info("为 UUID: {}, Currency: {} 初始化账户，初始余额: {}", uuid, currencyType, formatBalance(initialAmount));
+    if (setPlayerBalance(uuid, currencyType, initialAmount)) {
+        return initialAmount; // 初始化成功，返回初始金额
+    } else {
+        mLogger.error("为 UUID: {}, Currency: {} 初始化账户失败。", uuid, currencyType);
+        return std::nullopt; // 初始化失败
+    }
+}
+
+// 新增：获取余额或初始化的实现
+int64_t MoneyManager::getPlayerBalanceOrInit(const std::string& uuid, const std::string& currencyType) {
+    // 1. 尝试获取现有余额
+    std::optional<int64_t> currentBalanceOpt = getPlayerBalance(uuid, currencyType);
+
+    if (currentBalanceOpt.has_value()) {
+        // 账户已存在，直接返回余额
+        return currentBalanceOpt.value();
+    } else {
+        // 账户不存在，尝试初始化
+        std::optional<int64_t> initialBalanceOpt = initializeAccount(uuid, currencyType);
+        if (initialBalanceOpt.has_value()) {
+            // 初始化成功，返回初始余额
+            return initialBalanceOpt.value();
+        } else {
+            // 初始化失败
+            mLogger.error("无法获取或初始化 UUID: {}, Currency: {} 的余额。", uuid, currencyType);
+            // 抛出异常或返回一个错误指示值，这里选择抛出异常
+            throw std::runtime_error("无法获取或初始化玩家余额");
+            // 或者返回 0 并记录错误:
+            // return 0LL;
+        }
+    }
+}
+
 
 // 设置玩家余额的实现
 bool MoneyManager::setPlayerBalance(const std::string& uuid, const std::string& currencyType, int64_t amount) {
+    // 0. 检查货币类型是否已配置
+    if (!isCurrencyConfigured(currencyType)) {
+        mLogger.error("无法设置余额：货币类型 '{}' 未在配置中定义。", currencyType);
+        return false;
+    }
+
     // 检查数据库连接
     if (!mDbConnection.isConnected()) {
         mLogger.error("无法设置余额：数据库未连接。");
-        return false;
-        return false; // 连接失败
+        return false; // 连接失败 (修正了重复的 return false)
     }
 
     MYSQL* mysql = mDbConnection.getMYSQL(); // 获取底层连接
@@ -336,16 +406,22 @@ bool MoneyManager::setPlayerBalance(const std::string& uuid, const std::string& 
 }
 
 
-// 增加玩家余额的实现
+// 增加玩家余额的实现 (更新)
 bool MoneyManager::addPlayerBalance(const std::string& uuid, const std::string& currencyType, int64_t amountToAdd) {
+    // 0. 检查货币类型是否已配置
+    if (!isCurrencyConfigured(currencyType)) {
+        mLogger.error("无法增加余额：货币类型 '{}' 未在配置中定义。", currencyType);
+        return false;
+    }
+
     // 检查增加的金额是否为正数
     if (amountToAdd <= 0) {
-        mLogger.warn("尝试为 UUID: {}, Currency: {} 增加非正数金额 ({})", amountToAdd, uuid, currencyType);
+        mLogger.warn("尝试为 UUID: {}, Currency: {} 增加非正数金额 ({})", uuid, currencyType, formatBalance(amountToAdd));
         // 增加 0 视为成功，但无实际操作
         return amountToAdd == 0;
     }
 
-    // --- 事务处理 (推荐使用以保证原子性：要么都成功，要么都失败) ---
+    // --- 事务处理 (推荐) ---
     // 注意：以下事务控制代码被注释掉了，如果需要严格的原子性，应取消注释并进行测试。
     // 简单的事务控制可以通过执行 SQL 语句实现。更复杂的场景可能需要事务管理类。
     // bool transactionStarted = false;
@@ -356,63 +432,66 @@ bool MoneyManager::addPlayerBalance(const std::string& uuid, const std::string& 
     //     return false; // 无法启动事务，操作失败
     // }
 
-    // 1. 获取当前余额
-    std::optional<int64_t> currentBalanceOpt = getPlayerBalance(uuid, currencyType);
-    int64_t newBalance;
+    try {
+        // 1. 获取当前余额，如果不存在则初始化
+        int64_t currentBalance = getPlayerBalanceOrInit(uuid, currencyType);
 
-    if (currentBalanceOpt.has_value()) {
-        // 账户已存在
-        int64_t currentBalance = currentBalanceOpt.value();
-        // 检查加法是否会导致溢出 (int64_t 最大值)
+        // 2. 检查加法是否会导致溢出
         if (currentBalance > std::numeric_limits<int64_t>::max() - amountToAdd) {
              mLogger.error("为 UUID: {}, Currency: {} 增加余额时检测到潜在溢出。当前: {}, 增加: {}",
-                           uuid, currencyType, currentBalance, amountToAdd);
-             // if (transactionStarted) mDbConnection.query("ROLLBACK"); // 回滚事务
+                           uuid, currencyType, formatBalance(currentBalance), formatBalance(amountToAdd));
+             // if (transactionStarted) mDbConnection.query("ROLLBACK");
              return false; // 操作失败
         }
-        newBalance = currentBalance + amountToAdd; // 计算新余额
-    } else {
-        // 账户不存在，新余额即为要增加的金额
-        // 检查 amountToAdd 本身是否在有效范围内 (虽然 int64_t 范围很大)
-        newBalance = amountToAdd;
+        int64_t newBalance = currentBalance + amountToAdd; // 计算新余额
+
+        // 3. 设置新余额 (调用 setPlayerBalance 实现更新)
+        bool success = setPlayerBalance(uuid, currencyType, newBalance);
+
+        // --- 事务结束 ---
+        // if (transactionStarted) {
+        //     if (success) {
+        //         // 操作成功，提交事务
+        //         if (mDbConnection.query("COMMIT") != 0) {
+        //             mLogger.error("为增加余额提交事务失败: {}", mysql_error(mDbConnection.getMYSQL()));
+        //             // 提交失败可能导致数据不一致，需要特别注意！
+        //             // 此时 setPlayerBalance 可能已成功，但事务未提交。
+        //             return false; // 如果提交失败，也视为操作失败
+        //         }
+        //     } else {
+        //         // 操作失败 (setPlayerBalance 返回 false)，回滚事务
+        //         if (mDbConnection.query("ROLLBACK") != 0) {
+        //             // 回滚失败也需要记录错误
+        //             mLogger.error("为增加余额回滚事务失败: {}", mysql_error(mDbConnection.getMYSQL()));
+        //         }
+        //         // success 已经是 false
+        //     }
+        // }
+
+        if (success) {
+             mLogger.debug("成功为 UUID: {}, Currency: {} 增加余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToAdd), formatBalance(newBalance));
+        }
+        return success;
+
+    } catch (const std::runtime_error& e) {
+        // 捕获 getPlayerBalanceOrInit 可能抛出的异常 (例如初始化失败)
+        mLogger.error("增加余额失败 (获取或初始化时出错): {}", e.what());
+        // if (transactionStarted) mDbConnection.query("ROLLBACK");
+        return false;
     }
-
-    // 2. 设置新余额 (调用 setPlayerBalance 实现插入或更新)
-    bool success = setPlayerBalance(uuid, currencyType, newBalance);
-
-    // --- 事务结束 ---
-    // if (transactionStarted) {
-    //     if (success) {
-    //         // 操作成功，提交事务
-    //         if (mDbConnection.query("COMMIT") != 0) {
-    //             mLogger.error("为增加余额提交事务失败: {}", mysql_error(mDbConnection.getMYSQL()));
-    //             // 提交失败可能导致数据不一致，需要特别注意！
-    //             // 此时 setPlayerBalance 可能已成功，但事务未提交。
-    //             return false; // 如果提交失败，也视为操作失败
-    //         }
-    //     } else {
-    //         // 操作失败 (setPlayerBalance 返回 false)，回滚事务
-    //         if (mDbConnection.query("ROLLBACK") != 0) {
-    //             // 回滚失败也需要记录错误
-    //             mLogger.error("为增加余额回滚事务失败: {}", mysql_error(mDbConnection.getMYSQL()));
-    //         }
-    //         // success 已经是 false
-    //     }
-    // }
-
-    // 记录调试信息
-    if (success) {
-         mLogger.debug("成功为 UUID: {}, Currency: {} 增加余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToAdd), formatBalance(newBalance));
-    }
-
-    return success; // 返回 setPlayerBalance 的结果
 }
 
-// 减少玩家余额的实现
+// 减少玩家余额的实现 (保持不变，不初始化)
 bool MoneyManager::subtractPlayerBalance(const std::string& uuid, const std::string& currencyType, int64_t amountToSubtract) {
+    // 0. 检查货币类型是否已配置
+    if (!isCurrencyConfigured(currencyType)) {
+        mLogger.error("无法减少余额：货币类型 '{}' 未在配置中定义。", currencyType);
+        return false;
+    }
+
     // 检查减少的金额是否为正数
     if (amountToSubtract <= 0) {
-        mLogger.warn("尝试为 UUID: {}, Currency: {} 减少非正数金额 ({})", amountToSubtract, uuid, currencyType);
+        mLogger.warn("尝试为 UUID: {}, Currency: {} 减少非正数金额 ({})", uuid, currencyType, formatBalance(amountToSubtract));
         // 减少 0 视为成功
         return amountToSubtract == 0;
     }
@@ -426,7 +505,7 @@ bool MoneyManager::subtractPlayerBalance(const std::string& uuid, const std::str
     //     return false;
     // }
 
-    // 1. 获取当前余额
+    // 1. 获取当前余额 (不使用 OrInit，因为扣款前必须有账户)
     std::optional<int64_t> currentBalanceOpt = getPlayerBalance(uuid, currencyType);
 
     // 检查账户是否存在
@@ -450,7 +529,7 @@ bool MoneyManager::subtractPlayerBalance(const std::string& uuid, const std::str
     // 如果 currentBalance 接近 int64_min，减去一个正数可能导致下溢
      if (currentBalance < std::numeric_limits<int64_t>::min() + amountToSubtract) {
          mLogger.error("为 UUID: {}, Currency: {} 减少余额时检测到潜在下溢。当前: {}, 减少: {}",
-                       uuid, currencyType, currentBalance, amountToSubtract);
+                       uuid, currencyType, formatBalance(currentBalance), formatBalance(amountToSubtract));
          // if (transactionStarted) mDbConnection.query("ROLLBACK");
          return false; // 操作失败
      }

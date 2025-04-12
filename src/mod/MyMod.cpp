@@ -2,10 +2,11 @@
 #include "ll/api/mod/RegisterHelper.h"
 #include "ll/api/io/Logger.h"
 #include "ll/api/Config.h"
-#include "mod/money.h"    
+#include "mod/money.h"
+#include "mod/command.h" // 包含 command.h
 #include <stdexcept>
 #include <filesystem>
-#include <stdexcept> 
+#include <stdexcept>
 
 namespace my_mod {
 
@@ -76,11 +77,18 @@ bool MyMod::enable() {
             logger.info("Database connection successful!"); // 连接成功
 
             // --- 初始化 MoneyManager ---
-            // 创建 MoneyManager 实例，传入数据库连接
-            mMoneyManager = std::make_unique<MoneyManager>(*mDbConnection);
+            // 创建 MoneyManager 实例，传入数据库连接和配置对象
+            mMoneyManager = std::make_unique<MoneyManager>(*mDbConnection, getConfig()); // 传递配置
             logger.info("Initializing money database table..."); // 记录初始化数据表
             if (mMoneyManager->initializeTable()) { // 初始化数据库表
                 logger.info("Money database table initialized successfully."); // 初始化成功
+
+                // --- 注册命令 ---
+                logger.info("Registering money commands...");
+                registerMoneyCommands(); // 在 MoneyManager 初始化成功后注册命令
+                logger.info("Money commands registered.");
+                // --- 命令注册结束 ---
+
             } else {
                 logger.error("Failed to initialize money database table!"); // 初始化失败
                 // 初始化失败，阻止插件启用
