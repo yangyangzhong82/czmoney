@@ -24,7 +24,7 @@ option("target_type")
     set_values("server", "client")
 option_end()
 
-target("czmoney") -- Change this to your mod name.
+target("money") -- Change this to your mod name.
     add_rules("@levibuildscript/linkrule")
     add_rules("@levibuildscript/modpacker")
     add_cxflags( "/EHa", "/utf-8", "/W4", "/w44265", "/w44289", "/w44296", "/w45263", "/w44738", "/w45204")
@@ -45,3 +45,12 @@ target("czmoney") -- Change this to your mod name.
     --     add_includedirs("src-client")
     --     add_files("src-client/**.cpp")
     -- end
+        after_build(function (target)
+        local bindir = path.join(os.projectdir(), "bin")
+        local includedir = path.join(bindir, "include")
+        local libdir = path.join(bindir, "lib")
+        os.mkdir(includedir)
+        os.mkdir(libdir)
+        os.cp(path.join(os.projectdir(), "src","**.h"), includedir)
+        os.cp(path.join(target:targetdir(), target:name() .. ".lib"), libdir)
+        end)

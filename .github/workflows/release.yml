@@ -27,13 +27,13 @@ jobs:
 
       - name: Prepare Artifact Name
         id: artifact_info
-        # Assuming the target name in xmake.lua is 'czmoney'
-        # Adjust 'czmoney.dll' if your target name or output is different
+        # Assuming the target name in xmake.lua is 'money'
+        # Adjust 'money.dll' if your target name or output is different
         # Adjust the path if xmake outputs to a different location
         run: |
-          echo "PLUGIN_DLL=build\windows\x64\release\czmoney.dll" >> $env:GITHUB_OUTPUT
-          echo "ARTIFACT_NAME=czmoney-${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
-          echo "ZIP_NAME=czmoney-${{ github.ref_name }}.zip" >> $env:GITHUB_OUTPUT
+          echo "PLUGIN_DLL=build\windows\x64\release\money.dll" >> $env:GITHUB_OUTPUT
+          echo "ARTIFACT_NAME=money-${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
+          echo "ZIP_NAME=money-${{ github.ref_name }}.zip" >> $env:GITHUB_OUTPUT
         shell: pwsh
 
       - name: Check if DLL exists
@@ -74,6 +74,7 @@ jobs:
         with:
           files: ${{ steps.artifact_info.outputs.ZIP_NAME }}
           body: ${{ steps.release_notes.outputs.body }}
+          append_body: true # Append the checksum to auto-generated notes
           # You can enable prerelease or draft options if needed
           # prerelease: false
           # draft: false
