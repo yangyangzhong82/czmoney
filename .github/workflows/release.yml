@@ -1,79 +1,72 @@
+name: Release Plugin
+
 on:
-  release:
-    types:
-      - published
-  
+  push:
+    tags:
+      - 'v*' # Trigger on tags like v1.0, v2.0.0, etc.
+
+permissions:
+  contents: write # Needed to create releases and upload assets
+
 jobs:
-  build:
-    runs-on: windows-latest
+  release:
+    runs-on: windows-latest # LeviLamina plugins are typically DLLs, so build on Windows
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: xmake-io/github-action-setup-xmake@v1
-        # with:
-        #   xmake-version: branch@master
-
-      - uses: actions/cache@v4
+      - name: Set up xmake
+        uses: xmake-io/github-action-setup-xmake@v1
         with:
-          path: |
-            ~/AppData/Local/.xmake
-          key: xmake-${{ hashFiles('xmake.lua') }}
-          restore-keys: |
-            xmake-
+          xmake-version: latest
 
-      - run: |
-          xmake repo -u
+      - name: Build plugin (Release)
+        run: xmake build -m release czmoney # Assuming 'czmoney' is the target name in xmake.lua
 
-      - run: |
-          xmake f -a x64 -m release -p windows -y
+      # Assuming the output is in build\release\windows\x64\bin\czmoney.dll
+      # Adjust the path if necessary based on your xmake.lua configuration
+      - name: Prepare Release Asset
+        shell: pwsh
+        run: |
+          $asset_name = "czmoney-${{ github.ref_name }}.zip"
+          $plugin_dll = "build/release/windows/x64/bin/czmoney.dll" # Adjust this path if needed
+          $manifest = "manifest.json"
+          if (-not (Test-Path $plugin_dll)) {
+            Write-Error "Plugin DLL not found at $plugin_dll"
+            exit 1
+          }
+          if (-not (Test-Path $manifest)) {
+            Write-Error "manifest.json not found"
+            exit 1
+          }
+          Compress-Archive -Path $plugin_dll, $manifest -DestinationPath $asset_name
+          echo "ASSET_NAME=$asset_name" >> $env:GITHUB_ENV
+          echo "ASSET_PATH=./$asset_name" >> $env:GITHUB_ENV
 
-      - run: |
-          xmake -w -y
+      - name: Calculate SHA256
+        id: sha256
+        shell: pwsh
+        run: |
+          $sha256 = (Get-FileHash -Algorithm SHA256 ${{ env.ASSET_PATH }}).Hash.ToLower()
+          echo "sha256_hash=$sha256" >> $env:GITHUB_OUTPUT
+          echo "SHA256: $sha256"
 
-      - uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.event.repository.name }}-windows-x64-${{ github.sha }}
-          path: |
-            bin/
-
-  update-release-notes:
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - id: extract-release-notes
-        uses: ffurrer2/extract-release-notes@v2
-
-      - uses: softprops/action-gh-release@v1
-        with:
+          files: ${{ env.ASSET_PATH }}
+          # Use tag message as initial body, or fallback to tag name
           body: |
-            ${{ steps.extract-release-notes.outputs.release_notes }}
+            ${{ github.event.head_commit.message }}
 
-  upload-to-release:
-    needs:
-      - build
-      - update-release-notes
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+            ---
+            **SHA256 Checksum:** `${{ steps.sha256.outputs.sha256_hash }}`
+          # Let the action generate release notes based on commits if body is empty
+          # generate_release_notes: true # Uncomment if you prefer auto-generated notes
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: ${{ github.event.repository.name }}-windows-x64-${{ github.sha }}
-          path: artifact
-
-      - run: |
-          cp CHANGELOG.md LICENSE README.md artifact/
-
-      - run: |
-          zip -r ../${{ github.event.repository.name }}-windows-x64.zip *
-        working-directory: artifact
-
-      - uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            ${{ github.event.repository.name }}-windows-x64.zip
+      # Note: softprops/action-gh-release v2 automatically appends checksums if needed,
+      # but the above explicitly adds it to the body for clarity and control.
+      # If you prefer the action's built-in way, remove the SHA256 line from the body
+      # and potentially use generate_release_notes.
+      # The current setup explicitly adds the SHA256 to the provided body.
