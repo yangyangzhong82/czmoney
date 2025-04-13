@@ -1,10 +1,8 @@
-name: Release Workflow
-
 on:
   release:
     types:
       - published
-
+  
 jobs:
   build:
     runs-on: windows-latest
@@ -34,70 +32,48 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.repository.name }}-build-output-${{ github.sha }} # 更明确的 Artifact 名称
+          name: ${{ github.event.repository.name }}-windows-x64-${{ github.sha }}
           path: |
             bin/
 
-  # 将 update-release-notes 和 upload-to-release 合并
-  publish-release:
-    needs: build # 只依赖 build job
+  update-release-notes:
     permissions:
-      contents: write # 需要写权限来修改 Release 和上传文件
-    runs-on: ubuntu-latest # sha256sum 在 Ubuntu 上更容易使用
+      contents: write
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 下载构建产物
-      - uses: actions/download-artifact@v4
-        with:
-          name: ${{ github.event.repository.name }}-build-output-${{ github.sha }} # 使用与上传时相同的名称
-          path: artifact/bin # 下载到 artifact/bin 目录
-
-      # 准备最终的发布目录结构
-      - run: |
-          mkdir -p release_package # 创建一个干净的目录用于打包
-          mv artifact/bin/* release_package/ # 将构建产物移入
-          cp CHANGELOG.md LICENSE README.md release_package/ # 复制其他文件
-
-      # 定义发布包文件名
-      - name: Set Release Asset Name
-        id: set_asset_name
-        run: |
-          echo "ASSET_NAME=${{ github.event.repository.name }}-windows-x64.zip" >> $GITHUB_ENV
-
-      # 创建 zip 压缩包
-      - name: Create Zip Archive
-        run: |
-          zip -r ../${{ env.ASSET_NAME }} *
-        working-directory: release_package # 在 release_package 目录内执行 zip
-
-      # 计算 SHA256 校验和
-      - name: Calculate SHA256 Checksum
-        id: checksum
-        run: |
-          cd .. # 返回到根目录
-          checksum_value=$(sha256sum ${{ env.ASSET_NAME }} | awk '{ print $1 }')
-          echo "sha256=${checksum_value}" >> $GITHUB_OUTPUT
-
-      - name: Extract Base Release Notes
-        id: extract_notes
+      - id: extract-release-notes
         uses: ffurrer2/extract-release-notes@v2
 
-      # 更新 Release：上传文件并设置包含校验和的最终 Notes
-      - name: Update GitHub Release
-        uses: softprops/action-gh-release@v2 
+      - uses: softprops/action-gh-release@v1
         with:
           body: |
-            ${{ steps.extract_notes.outputs.release_notes }}
+            ${{ steps.extract-release-notes.outputs.release_notes }}
 
-            ---
-            ## SHA256 Checksum
+  upload-to-release:
+    needs:
+      - build
+      - update-release-notes
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-            ```
-            ${{ steps.checksum.outputs.sha256 }}  ${{ env.ASSET_NAME }}
-            ```
-          # 上传 zip 文件
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-windows-x64-${{ github.sha }}
+          path: artifact
+
+      - run: |
+          cp CHANGELOG.md LICENSE README.md artifact/
+
+      - run: |
+          zip -r ../${{ github.event.repository.name }}-windows-x64.zip *
+        working-directory: artifact
+
+      - uses: softprops/action-gh-release@v1
+        with:
           files: |
-            ../${{ env.ASSET_NAME }} # zip 文件现在在上一级目录
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+            ${{ github.event.repository.name }}-windows-x64.zip
