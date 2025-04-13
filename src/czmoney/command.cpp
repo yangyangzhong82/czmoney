@@ -1,11 +1,11 @@
-#include "mod/command.h"
-#include "mod/MyMod.h" // 获取 MoneyManager 和 Config
-#include "mod/money.h" // 使用 MoneyManager 功能
+#include "czmoney/command.h"
+#include "czmoney/MyMod.h" // 获取 MoneyManager 和 Config
+#include "czmoney/money.h" // 使用 MoneyManager 功能
 #include "ll/api/command/CommandRegistrar.h"
 #include "ll/api/command/CommandHandle.h"
 #include "ll/api/command/EnumName.h" // 新增: 用于获取 SoftEnum 名称
 #include "ll/api/command/SoftEnum.h" // 新增: 明确包含 SoftEnum
-#include "mod/config.h" // 确保包含 Config
+#include "czmoney/config.h" // 确保包含 Config
 #include "mc/server/commands/CommandOutput.h" // Corrected include path
 #include "mc/server/commands/CommandOrigin.h" // Corrected include path
 #include "mc/server/commands/Command.h"       // Added include for Command
@@ -22,7 +22,7 @@
 #include <fmt/format.h> // 包含 fmt 用于格式化字符串
 #include <vector>       // 用于存储从配置中提取的货币类型
 
-namespace my_mod {
+namespace czmoney {
 
 using ll::command::CommandRegistrar;
 using ll::command::CommandHandle;
@@ -561,4 +561,4 @@ void registerMoneyCommands() {
 
 } // registerMoneyCommands function end
 
-} // namespace my_mod
+} // namespace czmoney

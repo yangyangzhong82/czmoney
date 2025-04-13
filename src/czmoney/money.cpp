@@ -1,5 +1,5 @@
-#include "mod/money.h"
-#include "mod/mysql.h"
+#include "czmoney/money.h"
+#include "czmoney/mysql.h"
 #include "ll/api/mod/NativeMod.h"
 #include "ll/api/memory/Hook.h"
 #include <mysql.h>
@@ -12,7 +12,7 @@
 #include <cmath>
 #include <utility> // For std::move
 
-namespace my_mod {
+namespace czmoney {
 
 // RAII (Resource Acquisition Is Initialization) 辅助类，用于自动管理 MYSQL_STMT 的生命周期
 // 确保在作用域结束时自动调用 mysql_stmt_close
@@ -723,4 +723,4 @@ std::optional<int64_t> MoneyManager::parseBalance(const std::string& formattedAm
 }
 
 
-} // namespace my_mod
+} // namespace czmoney

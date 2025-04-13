@@ -4,7 +4,7 @@
 #include <cstdint>     // 使用 int64_t 等固定宽度整数类型
 #include <optional>    // 使用 std::optional 表示可能不存在的值
 #include "ll/api/io/Logger.h" // 引入 LeviLamina 的日志记录器
-#include "mod/config.h" // 包含配置文件头文件
+#include "czmoney/config.h" // 包含配置文件头文件
 
 // 前向声明 (Forward declaration)
 // 这样可以避免在头文件中包含 mysql.h，减少编译依赖
@@ -12,7 +12,7 @@ namespace db {
 class MySQLConnection;
 }
 
-namespace my_mod {
+namespace czmoney {
 
 // Config 结构体已包含
 
@@ -152,4 +152,4 @@ private:
     // 可以在这里添加其他私有辅助函数
 };
 
-} // namespace my_mod
+} // namespace czmoney

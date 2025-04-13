@@ -4,7 +4,7 @@
 #include <unordered_map> // 包含 unordered_map 头文件
 #include <cstdint>       // 包含 int64_t 类型
 
-namespace my_mod {
+namespace czmoney {
 
 // 结构体：包含特定货币类型的设置
 struct CurrencyConfig {
@@ -42,4 +42,4 @@ struct Config {
     // std::string defaultCurrencyType = "money";
 };
 
-} // namespace my_mod
+} // namespace czmoney

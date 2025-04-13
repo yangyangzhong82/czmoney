@@ -1,13 +1,13 @@
 #pragma once
 
 #include "ll/api/mod/NativeMod.h"
-#include "mod/mysql.h" // 包含 MySQL 连接头文件
-#include "mod/config.h"
-#include "mod/money.h" // 包含 MoneyManager 头文件
+#include "czmoney/mysql.h" // 包含 MySQL 连接头文件
+#include "czmoney/config.h"
+#include "czmoney/money.h" // 包含 MoneyManager 头文件
 #include <memory>      // 为了 std::unique_ptr
 #include <filesystem> // 为了 std::filesystem
 
-namespace my_mod {
+namespace czmoney {
 
 class MyMod {
 
@@ -47,4 +47,4 @@ private:
     std::filesystem::path mConfigPath; // 配置文件路径
 };
 
-} // namespace my_mod
+} // namespace czmoney

@@ -6,7 +6,7 @@
 #include <string>
 #include <cstdint> // for int64_t
 
-namespace my_mod {
+namespace czmoney {
 
 // 定义一个空的枚举类作为 SoftEnum 的基础
 // 这个枚举本身不包含任何值，值将从配置动态加载
@@ -76,4 +76,4 @@ struct MoneyReduceOfflineArgs {
  */
 void registerMoneyCommands();
 
-} // namespace my_mod
+} // namespace czmoney

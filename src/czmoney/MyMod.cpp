@@ -1,14 +1,14 @@
-#include "mod/MyMod.h"
+#include "czmoney/MyMod.h"
 #include "ll/api/mod/RegisterHelper.h"
 #include "ll/api/io/Logger.h"
 #include "ll/api/Config.h"
-#include "mod/money.h"
-#include "mod/command.h" // 包含 command.h
+#include "czmoney/money.h"
+#include "czmoney/command.h" // 包含 command.h
 #include <stdexcept>
 #include <filesystem>
 #include <stdexcept>
 
-namespace my_mod {
+namespace czmoney {
 
 // MyMod 类的单例实现
 MyMod& MyMod::getInstance() {
@@ -161,8 +161,8 @@ MoneyManager& MyMod::getMoneyManager() {
 }
 
 
-} // namespace my_mod
+} // namespace czmoney
 
 // 使用 LeviLamina 的宏注册插件
 // LL_REGISTER_MOD(插件类名, 获取插件实例的函数)
-LL_REGISTER_MOD(my_mod::MyMod, my_mod::MyMod::getInstance());
+LL_REGISTER_MOD(czmoney::MyMod, czmoney::MyMod::getInstance());

@@ -1,4 +1,4 @@
-#include "mod/mysql.h"
+#include "czmoney/mysql.h"
 #include <utility> // For std::move
 
 namespace db {
