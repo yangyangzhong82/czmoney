@@ -1,83 +1,79 @@
-name: Release Plugin
-
 on:
-  push:
-    tags:
-      - 'v*.*.*' # Trigger on version tags like v1.0.0
-
-permissions:
-  contents: write # Needed to create releases
-
-jobs:
   release:
-    name: Create Release
+    types:
+      - published
+  
+jobs:
+  build:
     runs-on: windows-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup xmake
-        uses: xmake-io/github-action-setup-xmake@v1
+      - uses: xmake-io/github-action-setup-xmake@v1
+        # with:
+        #   xmake-version: branch@master
+
+      - uses: actions/cache@v4
         with:
-          xmake-version: latest
+          path: |
+            ~/AppData/Local/.xmake
+          key: xmake-${{ hashFiles('xmake.lua') }}
+          restore-keys: |
+            xmake-
 
-      - name: Build plugin
-        run: xmake build -m release
-        shell: cmd # Use cmd shell on Windows
+      - run: |
+          xmake repo -u
 
-      - name: Prepare Artifact Name
-        id: artifact_info
-        # Assuming the target name in xmake.lua is 'money'
-        # Adjust 'money.dll' if your target name or output is different
-        # Adjust the path if xmake outputs to a different location
-        run: |
-          echo "PLUGIN_DLL=build\windows\x64\release\money.dll" >> $env:GITHUB_OUTPUT
-          echo "ARTIFACT_NAME=money-${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
-          echo "ZIP_NAME=money-${{ github.ref_name }}.zip" >> $env:GITHUB_OUTPUT
-        shell: pwsh
+      - run: |
+          xmake f -a x64 -m release -p windows -y
 
-      - name: Check if DLL exists
-        run: |
-          if (-not (Test-Path ${{ steps.artifact_info.outputs.PLUGIN_DLL }})) {
-            echo "Error: Plugin DLL not found at ${{ steps.artifact_info.outputs.PLUGIN_DLL }}"
-            exit 1
-          }
-        shell: pwsh
+      - run: |
+          xmake -w -y
 
-      - name: Create Release Archive
-        run: Compress-Archive -Path ${{ steps.artifact_info.outputs.PLUGIN_DLL }} -DestinationPath ${{ steps.artifact_info.outputs.ZIP_NAME }}
-        shell: pwsh
-
-      - name: Calculate SHA256 Checksum
-        id: checksum
-        run: |
-          $hash = (Get-FileHash -Algorithm SHA256 ${{ steps.artifact_info.outputs.ZIP_NAME }}).Hash.ToLower()
-          echo "sha256=$hash" >> $env:GITHUB_OUTPUT
-          echo "Checksum calculated: $hash"
-        shell: pwsh
-
-      - name: Create Release Notes Body
-        id: release_notes
-        run: |
-          $body = @"
-          **SHA256 Checksum:**
-          `${{ steps.checksum.outputs.sha256 }}`
-          "@
-          # Use GITHUB_OUTPUT environment file for multiline strings
-          echo 'body<<EOF' >> $env:GITHUB_OUTPUT
-          echo $body >> $env:GITHUB_OUTPUT
-          echo 'EOF' >> $env:GITHUB_OUTPUT
-        shell: pwsh
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          files: ${{ steps.artifact_info.outputs.ZIP_NAME }}
-          body: ${{ steps.release_notes.outputs.body }}
-          append_body: true # Append the checksum to auto-generated notes
-          # You can enable prerelease or draft options if needed
-          # prerelease: false
-          # draft: false
-          generate_release_notes: true # Automatically generate release notes from commits/PRs and append the checksum
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: ${{ github.event.repository.name }}-windows-x64-${{ github.sha }}
+          path: |
+            bin/
+
+  update-release-notes:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: extract-release-notes
+        uses: ffurrer2/extract-release-notes@v2
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          body: |
+            ${{ steps.extract-release-notes.outputs.release_notes }}
+
+  upload-to-release:
+    needs:
+      - build
+      - update-release-notes
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}-windows-x64-${{ github.sha }}
+          path: artifact
+
+      - run: |
+          cp CHANGELOG.md LICENSE README.md artifact/
+
+      - run: |
+          zip -r ../${{ github.event.repository.name }}-windows-x64.zip *
+        working-directory: artifact
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ${{ github.event.repository.name }}-windows-x64.zip
