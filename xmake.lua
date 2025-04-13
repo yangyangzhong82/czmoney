@@ -47,10 +47,10 @@ target("czmoney") -- Change this to your mod name.
     -- end
         after_build(function (target)
         local bindir = path.join(os.projectdir(), "bin")
-        local includedir = path.join(bindir, "include")
+        local includedir = path.join(bindir, "include", "czmoney") -- 修改目标包含目录
         local libdir = path.join(bindir, "lib")
         os.mkdir(includedir)
         os.mkdir(libdir)
-        os.cp(path.join(os.projectdir(), "src","**.h"), includedir)
+        os.cp(path.join(os.projectdir(), "src", "czmoney", "**.h"), includedir) -- 只复制czmoney子目录下的头文件
         os.cp(path.join(target:targetdir(), target:name() .. ".lib"), libdir)
         end)
