@@ -50,6 +50,48 @@ void sendFeedback(CommandOutput& output, const std::string& message, bool isSucc
     }
 }
 
+// 新增辅助函数：将命令输入的 float 金额转换为 int64_t (分)，并进行校验 (截断)
+std::optional<int64_t> convertCommandFloatToInt64(float amount, CommandOutput& output, bool requirePositive = false) {
+    // 1. 检查 NaN 和 Infinity
+    if (std::isnan(amount) || std::isinf(amount)) {
+        output.error(fmt::format("无效的金额输入 (NaN 或 Infinity): {}", amount));
+        return std::nullopt;
+    }
+
+    // 2. 检查是否要求为正数 (用于 add/reduce)
+    if (requirePositive && amount <= 0.0f) {
+        // 对于 add/reduce，0 是无效的
+        output.error(fmt::format("金额必须为正数，收到: {}", amount));
+        return std::nullopt;
+    }
+     // 对于 set，允许负数
+     if (!requirePositive && amount < 0.0f) {
+         // 允许负数
+     }
+
+    // 3. 转换为分 (不进行四舍五入)
+    // 先转 double 提高精度
+    double amountDouble = static_cast<double>(amount);
+    double centsDouble = amountDouble * 100.0;
+
+    // 4. 检查转换后的值是否在 int64_t 范围内 (截断前的检查)
+    const double min_representable = static_cast<double>(std::numeric_limits<int64_t>::min());
+    const double max_representable_plus_one = static_cast<double>(std::numeric_limits<int64_t>::max()) + 1.0;
+
+    if (centsDouble < min_representable || centsDouble >= max_representable_plus_one) {
+        // 使用更精确的范围提示
+        output.error(fmt::format("金额 {} 转换后超出有效范围 [{}, {})",
+                                 amount,
+                                 MoneyManager::formatBalance(std::numeric_limits<int64_t>::min()), // 格式化最小值
+                                 MoneyManager::formatBalance(std::numeric_limits<int64_t>::max()) + ".01" // 格式化最大值+0.01表示上限
+                                 ));
+        return std::nullopt;
+    }
+
+    // 5. 安全地转换为 int64_t (执行截断)
+    return static_cast<int64_t>(centsDouble);
+}
+
 
 void registerMoneyCommands() {
     auto& registrar = CommandRegistrar::getInstance();
@@ -188,27 +230,12 @@ void registerMoneyCommands() {
                 std::string currency = getTargetCurrencyType(args.currencyType);
                 float inputAmount = args.amount; // Get the float amount
 
-                // Validate input amount (NaN, Infinity, negative)
-                if (std::isnan(inputAmount) || std::isinf(inputAmount)) {
-                    output.error("Invalid amount provided (NaN or Infinity).");
-                    return;
+                // 使用新的辅助函数转换和验证金额 (允许负数)
+                std::optional<int64_t> amountInCentsOpt = convertCommandFloatToInt64(inputAmount, output, false);
+                if (!amountInCentsOpt) {
+                    return; // 转换或验证失败，错误信息已由辅助函数输出
                 }
-                if (inputAmount < 0.0f) {
-                     output.error("Amount cannot be negative for set operation.");
-                     return;
-                }
-
-                // Convert to internal representation (cents), truncate, and check for overflow
-                float centsFloat = inputAmount * 100.0f; // Calculate cents as float
-                // Check for potential overflow before casting to int64_t
-                if (centsFloat < static_cast<float>(std::numeric_limits<int64_t>::min()) ||
-                    centsFloat >= static_cast<float>(std::numeric_limits<int64_t>::max()) + 1.0f) { // Check against max+1 due to truncation
-                    output.error(fmt::format("Amount {} is too large or small and would cause an overflow after conversion.", inputAmount));
-                    return;
-                }
-                // Cast to int64_t performs truncation towards zero
-                int64_t amountInCents = static_cast<int64_t>(centsFloat);
-
+                int64_t amountInCents = amountInCentsOpt.value();
 
                 auto results = args.target.results(origin);
                 if (results.empty()) {
@@ -221,13 +248,14 @@ void registerMoneyCommands() {
                 for (Player* player : results) {
                     if (!player) {
                         failCount++;
-                        continue;
+                         continue;
                     }
                     std::string uuidStr = player->getUuid().asString();
                     if (moneyManager.setPlayerBalance(uuidStr, currency, amountInCents)) { // Use amountInCents
                         successCount++;
                     } else {
                         failCount++;
+                         // 失败原因可能在 MoneyManager 或 API 层记录，这里只报告通用失败
                          output.error(fmt::format("Failed to set balance for {}.", player->getRealName()));
                     }
                 }
@@ -253,24 +281,12 @@ void registerMoneyCommands() {
                 std::string currency = getTargetCurrencyType(args.currencyType);
                 float inputAmount = args.amount;
 
-                // Validate input amount
-                if (std::isnan(inputAmount) || std::isinf(inputAmount)) {
-                    output.error("Invalid amount provided (NaN or Infinity).");
+                // 使用新的辅助函数转换和验证金额 (允许负数)
+                std::optional<int64_t> amountInCentsOpt = convertCommandFloatToInt64(inputAmount, output, false);
+                if (!amountInCentsOpt) {
                     return;
                 }
-                if (inputAmount < 0.0f) {
-                     output.error("Amount cannot be negative for set operation.");
-                     return;
-                }
-
-                // Convert to internal representation
-                float centsFloat = inputAmount * 100.0f;
-                if (centsFloat < static_cast<float>(std::numeric_limits<int64_t>::min()) ||
-                    centsFloat >= static_cast<float>(std::numeric_limits<int64_t>::max()) + 1.0f) {
-                    output.error(fmt::format("Amount {} is too large or small and would cause an overflow after conversion.", inputAmount));
-                    return;
-                }
-                int64_t amountInCents = static_cast<int64_t>(centsFloat);
+                int64_t amountInCents = amountInCentsOpt.value();
 
                 // Get player info
                 auto playerInfoOpt = PlayerInfo::getInstance().fromName(args.playerName);
@@ -309,26 +325,12 @@ void registerMoneyCommands() {
                 std::string currency = getTargetCurrencyType(args.currencyType);
                 float inputAmount = args.amount; // Get the float amount
 
-                // Validate input amount (NaN, Infinity, non-positive)
-                 if (std::isnan(inputAmount) || std::isinf(inputAmount)) {
-                    output.error("Invalid amount provided (NaN or Infinity).");
+                // 使用新的辅助函数转换和验证金额 (要求正数)
+                std::optional<int64_t> amountToAddInCentsOpt = convertCommandFloatToInt64(inputAmount, output, true);
+                 if (!amountToAddInCentsOpt) {
                     return;
                  }
-                 if (inputAmount <= 0.0f) {
-                     output.error("Amount to add must be positive.");
-                     return;
-                 }
-
-                // Convert to internal representation (cents), truncate, and check for overflow
-                float centsFloat = inputAmount * 100.0f; // Calculate cents as float
-                // Since inputAmount > 0, only check against max before casting
-                if (centsFloat >= static_cast<float>(std::numeric_limits<int64_t>::max()) + 1.0f) { // Check against max+1 due to truncation
-                    output.error(fmt::format("Amount {} is too large and would cause an overflow after conversion.", inputAmount));
-                    return;
-                }
-                 // Cast to int64_t performs truncation towards zero
-                int64_t amountToAddInCents = static_cast<int64_t>(centsFloat);
-
+                int64_t amountToAddInCents = amountToAddInCentsOpt.value();
 
                 auto results = args.target.results(origin);
                 if (results.empty()) {
@@ -341,13 +343,14 @@ void registerMoneyCommands() {
                 for (Player* player : results) {
                     if (!player) {
                         failCount++;
-                        continue;
+                         continue;
                     }
                     std::string uuidStr = player->getUuid().asString();
                     if (moneyManager.addPlayerBalance(uuidStr, currency, amountToAddInCents)) { // Use amountToAddInCents
                         successCount++;
                     } else {
                         failCount++;
+                        // 增加失败通常是溢出
                         output.error(fmt::format("Failed to add balance for {} (maybe overflow?).", player->getRealName()));
                     }
                 }
@@ -373,23 +376,12 @@ void registerMoneyCommands() {
                 std::string currency = getTargetCurrencyType(args.currencyType);
                 float inputAmount = args.amount;
 
-                // Validate input amount
-                if (std::isnan(inputAmount) || std::isinf(inputAmount)) {
-                    output.error("Invalid amount provided (NaN or Infinity).");
+                // 使用新的辅助函数转换和验证金额 (要求正数)
+                std::optional<int64_t> amountToAddInCentsOpt = convertCommandFloatToInt64(inputAmount, output, true);
+                if (!amountToAddInCentsOpt) {
                     return;
                 }
-                if (inputAmount <= 0.0f) {
-                    output.error("Amount to add must be positive.");
-                    return;
-                }
-
-                // Convert to internal representation
-                float centsFloat = inputAmount * 100.0f;
-                if (centsFloat >= static_cast<float>(std::numeric_limits<int64_t>::max()) + 1.0f) {
-                    output.error(fmt::format("Amount {} is too large and would cause an overflow after conversion.", inputAmount));
-                    return;
-                }
-                int64_t amountToAddInCents = static_cast<int64_t>(centsFloat);
+                int64_t amountToAddInCents = amountToAddInCentsOpt.value();
 
                 // Get player info
                 auto playerInfoOpt = PlayerInfo::getInstance().fromName(args.playerName);
@@ -413,7 +405,7 @@ void registerMoneyCommands() {
 
     // 4. money reduce <target> <amount> [currencyType] - 减少在线玩家余额
     moneyCommand.overload<MoneyReduceSelectorArgs>()
-        .text("reduce")
+        .text("reduce") // 命令文本改为 reduce (或 subtract)
         .required("target")
         .required("amount")
         .optional("currencyType") // 可选的货币类型参数 (现在是 SoftEnum)
@@ -430,26 +422,12 @@ void registerMoneyCommands() {
                 std::string currency = getTargetCurrencyType(args.currencyType);
                 float inputAmount = args.amount; // Get the float amount
 
-                // Validate input amount (NaN, Infinity, non-positive)
-                 if (std::isnan(inputAmount) || std::isinf(inputAmount)) {
-                    output.error("Invalid amount provided (NaN or Infinity).");
+                // 使用新的辅助函数转换和验证金额 (要求正数)
+                std::optional<int64_t> amountToReduceInCentsOpt = convertCommandFloatToInt64(inputAmount, output, true);
+                 if (!amountToReduceInCentsOpt) {
                     return;
                  }
-                 if (inputAmount <= 0.0f) {
-                     output.error("Amount to reduce must be positive.");
-                     return;
-                 }
-
-                 // Convert to internal representation (cents), truncate, and check for overflow
-                float centsFloat = inputAmount * 100.0f; // Calculate cents as float
-                 // Since inputAmount > 0, only check against max before casting
-                if (centsFloat >= static_cast<float>(std::numeric_limits<int64_t>::max()) + 1.0f) { // Check against max+1 due to truncation
-                    output.error(fmt::format("Amount {} is too large and would cause an overflow after conversion.", inputAmount));
-                    return;
-                }
-                 // Cast to int64_t performs truncation towards zero
-                int64_t amountToReduceInCents = static_cast<int64_t>(centsFloat);
-
+                int64_t amountToReduceInCents = amountToReduceInCentsOpt.value();
 
                 auto results = args.target.results(origin);
                 if (results.empty()) {
@@ -475,12 +453,13 @@ void registerMoneyCommands() {
                         if (!currentBalanceOpt.has_value()) {
                              output.error(fmt::format("Failed to reduce balance for {}: Account does not exist.", player->getRealName()));
                         } else if (currentBalanceOpt.value() < amountToReduceInCents) { // Compare with cents
-                             output.error(fmt::format("Failed to reduce balance for {}: Insufficient funds (has {}).", player->getRealName(), MoneyManager::formatBalance(currentBalanceOpt.value())));
-                        } else {
-                             output.error(fmt::format("Failed to reduce balance for {} (unknown reason).", player->getRealName()));
-                        }
-                    }
-                }
+                              output.error(fmt::format("Failed to reduce balance for {}: Insufficient funds (has {}).", player->getRealName(), MoneyManager::formatBalance(currentBalanceOpt.value())));
+                         } else {
+                             // 可能是数据库错误或其他内部问题
+                             output.error(fmt::format("Failed to reduce balance for {} (check logs for details).", player->getRealName()));
+                         }
+                     }
+                 }
                 sendFeedback(output, fmt::format("Reduced balance for {} players, {} failed.", successCount, failCount), successCount > 0);
             }
         );
@@ -488,7 +467,7 @@ void registerMoneyCommands() {
 
     // 新增: 4.1 money reduce <playerName> <amount> [currencyType] - 减少离线玩家余额
     moneyCommand.overload<MoneyReduceOfflineArgs>()
-        .text("reduce")
+        .text("reduce") // 命令文本改为 reduce
         .required("playerName")
         .required("amount")
         .optional("currencyType")
@@ -504,23 +483,12 @@ void registerMoneyCommands() {
                 std::string currency = getTargetCurrencyType(args.currencyType);
                 float inputAmount = args.amount;
 
-                // Validate input amount
-                if (std::isnan(inputAmount) || std::isinf(inputAmount)) {
-                    output.error("Invalid amount provided (NaN or Infinity).");
+                // 使用新的辅助函数转换和验证金额 (要求正数)
+                std::optional<int64_t> amountToReduceInCentsOpt = convertCommandFloatToInt64(inputAmount, output, true);
+                if (!amountToReduceInCentsOpt) {
                     return;
                 }
-                if (inputAmount <= 0.0f) {
-                    output.error("Amount to reduce must be positive.");
-                    return;
-                }
-
-                // Convert to internal representation
-                float centsFloat = inputAmount * 100.0f;
-                if (centsFloat >= static_cast<float>(std::numeric_limits<int64_t>::max()) + 1.0f) {
-                    output.error(fmt::format("Amount {} is too large and would cause an overflow after conversion.", inputAmount));
-                    return;
-                }
-                int64_t amountToReduceInCents = static_cast<int64_t>(centsFloat);
+                int64_t amountToReduceInCents = amountToReduceInCentsOpt.value();
 
                 // Get player info
                 auto playerInfoOpt = PlayerInfo::getInstance().fromName(args.playerName);
@@ -532,6 +500,7 @@ void registerMoneyCommands() {
                 std::string uuidStr = playerInfo.uuid.asString();
 
                 // Subtract balance (does not init account)
+                // 先检查账户是否存在和余额是否足够，提供更明确的错误信息
                 std::optional<int64_t> currentBalanceOpt = moneyManager.getPlayerBalance(uuidStr, currency);
                 if (!currentBalanceOpt.has_value()) {
                     sendFeedback(output, fmt::format("Failed to reduce balance for {}: Account does not exist.", playerInfo.name), false);
@@ -542,12 +511,13 @@ void registerMoneyCommands() {
                     return;
                 }
 
+                // 尝试扣款
                 if (moneyManager.subtractPlayerBalance(uuidStr, currency, amountToReduceInCents)) {
-                    int64_t newBalance = moneyManager.getPlayerBalanceOrInit(uuidStr, currency); // Re-fetch
+                    int64_t newBalance = currentBalanceOpt.value() - amountToReduceInCents; // 直接计算新余额
                     sendFeedback(output, fmt::format("Reduced {} from {}'s balance ({}). New balance: {}", MoneyManager::formatBalance(amountToReduceInCents), playerInfo.name, currency, MoneyManager::formatBalance(newBalance)), true);
                 } else {
-                    // Handle potential errors from subtractPlayerBalance itself (e.g., overflow check inside)
-                    sendFeedback(output, fmt::format("Failed to reduce balance for {} (unknown reason).", playerInfo.name), false);
+                    // 如果之前的检查都通过了，这里的失败可能是数据库错误等
+                    sendFeedback(output, fmt::format("Failed to reduce balance for {} (check logs for details).", playerInfo.name), false);
                 }
             }
         );
@@ -557,7 +527,6 @@ void registerMoneyCommands() {
     // - money query [currencyType] (查询自身余额)
     // - money pay <player> <amount> [currencyType] (转账)
     // - money top [count] [currencyType] (排行榜)
-    // - 不带选择器的管理员命令 (money set <playerName> ...) // 已部分实现
 
 } // registerMoneyCommands function end
 

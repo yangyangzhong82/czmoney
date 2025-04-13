@@ -52,32 +52,32 @@ CZMONEY_API int64_t getPlayerBalanceOrInit(std::string_view uuid, std::string_vi
  * 如果账户不存在，将自动创建。
  * @param uuid 玩家的 UUID
  * @param currencyType 货币类型
- * @param amount 要设置的余额
- * @return bool 操作是否成功
+ * @param amount 要设置的余额 (浮点数，例如 123.45)
+ * @return bool 操作是否成功 (包括金额有效性检查)
  */
-CZMONEY_API bool setPlayerBalance(std::string_view uuid, std::string_view currencyType, int64_t amount);
+CZMONEY_API bool setPlayerBalance(std::string_view uuid, std::string_view currencyType, double amount);
 
 /**
- * @brief 增加玩家指定货币类型的余额 (整数形式，实际金额 * 100)
+ * @brief 增加玩家指定货币类型的余额
  *
  * 如果账户不存在，将根据配置自动创建账户并设置初始值，然后在此基础上增加。
  * @param uuid 玩家的 UUID
  * @param currencyType 货币类型
- * @param amountToAdd 要增加的金额 (必须为正数)
- * @return bool 操作是否成功
+ * @param amountToAdd 要增加的金额 (必须为正的浮点数，例如 10.50)
+ * @return bool 操作是否成功 (包括金额有效性检查)
  */
-CZMONEY_API bool addPlayerBalance(std::string_view uuid, std::string_view currencyType, int64_t amountToAdd);
+CZMONEY_API bool addPlayerBalance(std::string_view uuid, std::string_view currencyType, double amountToAdd);
 
 /**
- * @brief 减少玩家指定货币类型的余额 (整数形式，实际金额 * 100)
+ * @brief 减少玩家指定货币类型的余额
  *
  * 如果账户不存在或余额不足，操作将失败。此操作 *不会* 初始化账户。
  * @param uuid 玩家的 UUID
  * @param currencyType 货币类型
- * @param amountToSubtract 要减少的金额 (必须为正数)
- * @return bool 如果操作成功（账户存在且余额足够）则返回 true，否则返回 false
+ * @param amountToSubtract 要减少的金额 (必须为正的浮点数，例如 5.25)
+ * @return bool 如果操作成功（账户存在且余额足够）则返回 true，否则返回 false (包括金额有效性检查)
  */
-CZMONEY_API bool subtractPlayerBalance(std::string_view uuid, std::string_view currencyType, int64_t amountToSubtract);
+CZMONEY_API bool subtractPlayerBalance(std::string_view uuid, std::string_view currencyType, double amountToSubtract);
 
 /**
  * @brief 检查玩家账户是否存在
