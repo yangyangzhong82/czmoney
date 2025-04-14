@@ -40,7 +40,10 @@ struct Config {
         // {"gems", {5.00, -10.00}} // 假设 gems 初始 5.00, 最低 -10.00
     };
 
-    // 未来可以添加其他全局配置
+    // 命令别名设置
+    std::vector<std::string> commandAliases = {"cm"}; // 默认别名
+
+
     // std::string defaultCurrencyType = "money";
 };
 

@@ -71,9 +71,13 @@ struct MoneyReduceOfflineArgs {
 
 // --- 命令注册函数声明 ---
 
+#include <vector> // 包含 vector 头文件
+#include <string> // 包含 string 头文件
+
 /**
  * @brief 注册所有与经济相关的命令
+ * @param aliases 要为根命令注册的别名列表
  */
-void registerMoneyCommands();
+void registerMoneyCommands(const std::vector<std::string>& aliases);
 
 } // namespace czmoney

@@ -83,7 +83,8 @@ bool MyMod::enable() {
 
                 // --- 注册命令 ---
                 logger.info("Registering money commands...");
-                registerMoneyCommands(); // 在 MoneyManager 初始化成功后注册命令
+                // 从配置中获取别名列表并传递给注册函数
+                registerMoneyCommands(getConfig().commandAliases);
                 logger.info("Money commands registered.");
                 // --- 命令注册结束 ---
 
@@ -141,7 +142,6 @@ bool MyMod::disable() {
     // --- 数据库连接结束 ---
 
 
-    // 其他禁用代码... (例如取消注册命令、取消监听事件等)
     return true; // 禁用成功
 }
 

@@ -1,26 +1,26 @@
 #include "czmoney/command.h"
-#include "czmoney/MyMod.h" // 获取 MoneyManager 和 Config
-#include "czmoney/money.h" // 使用 MoneyManager 功能
+#include "czmoney/MyMod.h" 
+#include "czmoney/money.h" 
 #include "ll/api/command/CommandRegistrar.h"
 #include "ll/api/command/CommandHandle.h"
-#include "ll/api/command/EnumName.h" // 新增: 用于获取 SoftEnum 名称
-#include "ll/api/command/SoftEnum.h" // 新增: 明确包含 SoftEnum
-#include "czmoney/config.h" // 确保包含 Config
-#include "mc/server/commands/CommandOutput.h" // Corrected include path
-#include "mc/server/commands/CommandOrigin.h" // Corrected include path
-#include "mc/server/commands/Command.h"       // Added include for Command
+#include "ll/api/command/EnumName.h" 
+#include "ll/api/command/SoftEnum.h" 
+#include "czmoney/config.h" 
+#include "mc/server/commands/CommandOutput.h" 
+#include "mc/server/commands/CommandOrigin.h" 
+#include "mc/server/commands/Command.h"       
 #include "mc/server/commands/CommandOriginType.h"
 #include "mc/server/commands/CommandPermissionLevel.h"
 #include "mc/world/actor/player/Player.h"
-#include "mc/platform/UUID.h" // Player::getUuid() 返回 mce::UUID
-#include "ll/api/service/PlayerInfo.h" // 新增: 包含 PlayerInfo 服务
+#include "mc/platform/UUID.h" 
+#include "ll/api/service/PlayerInfo.h" 
 #include <string>
 #include <vector>
 #include <optional>
-#include <cmath>        // For std::round, std::isnan, std::isinf
-#include <limits>       // For std::numeric_limits
-#include <fmt/format.h> // 包含 fmt 用于格式化字符串
-#include <vector>       // 用于存储从配置中提取的货币类型
+#include <cmath>        
+#include <limits>      
+#include <fmt/format.h> 
+#include <vector>       
 
 namespace czmoney {
 
@@ -92,8 +92,8 @@ std::optional<int64_t> convertCommandFloatToInt64(float amount, CommandOutput& o
     return static_cast<int64_t>(centsDouble);
 }
 
-
-void registerMoneyCommands() {
+// 修改函数签名以接受别名列表
+void registerMoneyCommands(const std::vector<std::string>& aliases) {
     auto& registrar = CommandRegistrar::getInstance();
     auto& logger = MyMod::getInstance().getSelf().getLogger(); // 获取 logger
 
@@ -112,7 +112,6 @@ void registerMoneyCommands() {
         logger.info("Registering SoftEnum '{}' for currency types.", currencyEnumName);
         if (!registrar.tryRegisterSoftEnum(currencyEnumName, currencyTypes)) {
             logger.error("Failed to register SoftEnum '{}'.", currencyEnumName);
-            // 可以选择在这里返回或抛出异常，如果 SoftEnum 注册失败是关键错误
         }
     } else {
         logger.info("Updating SoftEnum '{}' with currency types from config.", currencyEnumName);
@@ -124,10 +123,27 @@ void registerMoneyCommands() {
 
 
     auto& moneyCommand = registrar.getOrCreateCommand(
-        "cmoney",
+        "czmoney",
         "Manage player balances", // 命令描述
-        CommandPermissionLevel::Any    // 默认权限级别
+        CommandPermissionLevel::Any,    // 默认权限级别
+        CommandFlagValue::NotCheat //无需作弊
     );
+
+    // --- 添加命令别名 (从参数读取) ---
+    if (!aliases.empty()) {
+        logger.info("Registering command aliases:");
+        for (const auto& alias : aliases) {
+            if (!alias.empty()) { // 确保别名不为空
+                 moneyCommand.alias(alias);
+                 logger.info("- {}", alias);
+            } else {
+                 logger.warn("Skipping empty alias found in config.");
+            }
+        }
+    } else {
+        logger.warn("No command aliases found in config or the list is empty.");
+    }
+    // --- 别名添加结束 ---
 
     // --- 注册带选择器的子命令 ---
 
@@ -172,7 +188,7 @@ void registerMoneyCommands() {
             }
         );
 
-    // 新增: 1.1 money query <playerName> [currencyType] - 查询离线玩家余额
+    //  1.1 money query <playerName> [currencyType] - 查询离线玩家余额
     moneyCommand.overload<MoneyQueryOfflineArgs>()
         .text("query")
         .required("playerName")
@@ -265,7 +281,7 @@ void registerMoneyCommands() {
             }
         );
 
-    // 新增: 2.1 money set <playerName> <amount> [currencyType] - 设置离线玩家余额
+    //  2.1 money set <playerName> <amount> [currencyType] - 设置离线玩家余额
     moneyCommand.overload<MoneySetOfflineArgs>()
         .text("set")
         .required("playerName")
@@ -364,7 +380,7 @@ void registerMoneyCommands() {
             }
         );
 
-    // 新增: 3.1 money add <playerName> <amount> [currencyType] - 增加离线玩家余额
+    //  3.1 money add <playerName> <amount> [currencyType] - 增加离线玩家余额
     moneyCommand.overload<MoneyAddOfflineArgs>()
         .text("add")
         .required("playerName")
@@ -476,7 +492,7 @@ void registerMoneyCommands() {
         );
 
 
-    // 新增: 4.1 money reduce <playerName> <amount> [currencyType] - 减少离线玩家余额
+    //  4.1 money reduce <playerName> <amount> [currencyType] - 减少离线玩家余额
     moneyCommand.overload<MoneyReduceOfflineArgs>()
         .text("reduce") // 命令文本改为 reduce
         .required("playerName")
