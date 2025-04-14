@@ -70,12 +70,11 @@ bool MySQLConnection::connect() {
     // 初始化 MySQL 连接对象
     m_connection = mysql_init(nullptr);
     if (!m_connection) {
-        // 初始化失败，可以记录日志或抛出异常
-        // throw MySQLException("mysql_init failed"); // 示例：抛出异常
+        throw MySQLException("mysql_init failed"); // 抛出异常
         return false;
     }
 
-    // 设置字符集为 utf8mb4 (推荐)
+    // 设置字符集为 utf8mb4 
     mysql_options(m_connection, MYSQL_SET_CHARSET_NAME, "utf8mb4");
 
     // 尝试连接数据库
@@ -91,7 +90,7 @@ bool MySQLConnection::connect() {
         )) {
         // 连接失败
         // 可以记录详细错误信息: mysql_error(m_connection)
-        // throw MySQLException("mysql_real_connect failed", m_connection); // 示例：抛出异常
+        throw MySQLException("mysql_real_connect failed", m_connection); //抛出异常
         mysql_close(m_connection); // 清理已初始化的连接对象
         m_connection = nullptr;
         return false;
@@ -127,8 +126,7 @@ int MySQLConnection::query(const std::string& sql) {
 
     if (mysql_query(m_connection, sql.c_str())) {
         // 查询执行失败
-        // 可以记录错误: mysql_error(m_connection)
-        // throw MySQLException("mysql_query failed", m_connection); // 示例：抛出异常
+        throw MySQLException("mysql_query failed", m_connection); // 抛出异常
         return mysql_errno(m_connection); // 返回 MySQL 错误码
     }
 

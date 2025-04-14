@@ -484,17 +484,17 @@ void registerMoneyCommands() {
         .optional("currencyType")
         .execute(
             [](CommandOrigin const& origin, CommandOutput& output, MoneyReduceOfflineArgs const& args, ::Command const&) {
-                // --- Permission Check ---
+                
                 if (origin.getPermissionsLevel() < CommandPermissionLevel::GameDirectors) {
                     output.error("You do not have permission to use this command.");
                     return;
                 }
-                // --- End Permission Check ---
+               
                 auto& moneyManager = MyMod::getInstance().getMoneyManager();
                 std::string currency = getTargetCurrencyType(args.currencyType);
                 float inputAmount = args.amount;
 
-                // 使用新的辅助函数转换和验证金额 (要求正数)
+                // 验证金额 (要求正数)
                 std::optional<int64_t> amountToReduceInCentsOpt = convertCommandFloatToInt64(inputAmount, output, true);
                 if (!amountToReduceInCentsOpt) {
                     return;
@@ -510,7 +510,7 @@ void registerMoneyCommands() {
                 const auto& playerInfo = playerInfoOpt.value();
                 std::string uuidStr = playerInfo.uuid.asString();
 
-                // Subtract balance (does not init account)
+                
                 // 先检查账户是否存在和余额是否足够，提供更明确的错误信息
                 std::optional<int64_t> currentBalanceOpt = moneyManager.getPlayerBalance(uuidStr, currency);
                 if (!currentBalanceOpt.has_value()) {
@@ -522,7 +522,7 @@ void registerMoneyCommands() {
                     return;
                 }
 
-                // 尝试扣款 with reason
+                // 尝试扣款 
                 std::string reason1 = "Command: cmoney reduce";
                 if (moneyManager.subtractPlayerBalance(uuidStr, currency, amountToReduceInCents, reason1)) {
                     int64_t newBalance = currentBalanceOpt.value() - amountToReduceInCents; // 直接计算新余额

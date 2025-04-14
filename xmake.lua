@@ -10,7 +10,7 @@ if is_config("target_type", "server") then
 else
     add_requires("levilamina", {configs = {target_type = "client"}})
 end
-add_requires("sqlitecpp")
+-- add_requires("sqlitecpp") todo
 add_requires("mysql")
 add_requires("levibuildscript")
 

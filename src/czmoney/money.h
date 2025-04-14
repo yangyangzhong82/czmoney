@@ -3,6 +3,7 @@
 #include <string>      // 使用 std::string
 #include <cstdint>     // 使用 int64_t 等固定宽度整数类型
 #include <optional>    // 使用 std::optional 表示可能不存在的值
+#include <vector>      // 用于返回流水列表
 #include "ll/api/io/Logger.h" // 引入 LeviLamina 的日志记录器
 #include "czmoney/config.h" // 包含配置文件头文件
 
@@ -13,6 +14,12 @@ class MySQLConnection;
 }
 
 namespace czmoney {
+
+// TransactionLogEntry 结构体现在定义在 money_api.h 中
+struct TransactionLogEntry; // 前向声明，如果 MoneyManager 内部只需要指针或引用
+                            // 但由于返回类型是 std::vector<TransactionLogEntry>，
+                            // 包含 money_api.h 会更直接，或者确保 money.cpp 包含它。
+                            // 这里暂时保留前向声明，依赖 money.cpp 包含 money_api.h
 
 // Config 结构体已包含
 
@@ -155,6 +162,36 @@ public:
      */
     static std::optional<int64_t> parseBalance(const std::string& formattedAmount);
 
+    /**
+     * @brief 查询经济交易流水日志
+     *
+     * 支持根据多种条件进行筛选。
+     * @param uuidFilter 可选，按玩家 UUID 筛选
+     * @param currencyTypeFilter 可选，按货币类型筛选
+     * @param startTimeFilter 可选，按起始时间筛选 (格式: "YYYY-MM-DD HH:MM:SS")
+     * @param endTimeFilter 可选，按结束时间筛选 (格式: "YYYY-MM-DD HH:MM:SS")
+     * @param reason1Filter 可选，按理由 1 筛选 (支持 LIKE '%value%')
+     * @param reason2Filter 可选，按理由 2 筛选 (支持 LIKE '%value%')
+     * @param reason3Filter 可选，按理由 3 筛选 (支持 LIKE '%value%')
+     * @param limit 返回的最大记录数，0 表示不限制
+     * @param offset 查询结果的偏移量，用于分页
+     * @param ascendingOrder 是否按时间升序排序 (默认为 false，即降序)
+     * @return std::vector<TransactionLogEntry> 包含符合条件的流水记录列表。查询失败或无结果时返回空列表。
+     * @throws std::runtime_error 如果数据库操作失败。
+     */
+    std::vector<TransactionLogEntry> queryTransactionLogs(
+        const std::optional<std::string>& uuidFilter = std::nullopt,
+        const std::optional<std::string>& currencyTypeFilter = std::nullopt,
+        const std::optional<std::string>& startTimeFilter = std::nullopt,
+        const std::optional<std::string>& endTimeFilter = std::nullopt,
+        const std::optional<std::string>& reason1Filter = std::nullopt,
+        const std::optional<std::string>& reason2Filter = std::nullopt,
+        const std::optional<std::string>& reason3Filter = std::nullopt,
+        size_t                            limit = 100,
+        size_t                            offset = 0,
+        bool                              ascendingOrder = false
+    );
+
 
 private:
     /**
@@ -179,7 +216,7 @@ private:
     bool initializeLogTable();
 
     /**
-     * @brief 记录一笔经济交易流水 (私有辅助函数)
+     * @brief 记录一笔经济交易流水 
      * @param uuid 玩家 UUID
      * @param currencyType 货币类型
      * @param changeAmount 变动金额 (正数表示增加，负数表示减少)
@@ -201,21 +238,21 @@ private:
 
 
     /**
-     * @brief 检查指定的货币类型是否在配置中定义 (私有辅助函数)
+     * @brief 检查指定的货币类型是否在配置中定义 
      * @param currencyType 要检查的货币类型
      * @return bool 如果已配置则返回 true，否则返回 false
      */
     bool isCurrencyConfigured(const std::string& currencyType) const;
 
     /**
-     * @brief 获取指定货币类型的最低余额 (私有辅助函数)
+     * @brief 获取指定货币类型的最低余额
      * @param currencyType 货币类型
      * @return int64_t 最低余额 (整数，实际金额 * 100)。如果配置无效或转换失败，返回 0。
      */
     int64_t getMinimumBalance(const std::string& currencyType) const; // 返回类型不变，但内部实现会转换
 
     /**
-     * @brief 初始化指定玩家和货币类型的账户 (私有辅助函数)
+     * @brief 初始化指定玩家和货币类型的账户 
      *
      * 根据配置文件中的 initialBalances 设置初始值。
      * 如果配置文件中没有对应的 currencyType，则默认为 0。
@@ -225,7 +262,6 @@ private:
      */
     std::optional<int64_t> initializeAccount(const std::string& uuid, const std::string& currencyType); // 返回类型不变，但内部实现会转换
 
-    // 可以在这里添加其他私有辅助函数
 };
 
 } // namespace czmoney

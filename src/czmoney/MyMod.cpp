@@ -10,9 +10,9 @@
 
 namespace czmoney {
 
-// MyMod 类的单例实现
+
 MyMod& MyMod::getInstance() {
-    static MyMod instance; // 静态局部变量，保证线程安全（C++11 起）
+    static MyMod instance; 
     return instance;
 }
 
@@ -32,10 +32,8 @@ bool MyMod::load() {
         ll::config::loadConfig(getConfig(), mConfigPath);
         logger.info("Configuration loaded/updated."); // 配置加载成功
     } catch (const std::exception& e) {
-        // 捕获标准异常
         logger.error("Failed to load configuration: {}. Using default values.", e.what());
     } catch (...) {
-        // 捕获未知异常
         logger.error("Failed to load configuration due to an unknown error. Using default values.");
     }
 
@@ -55,7 +53,7 @@ bool MyMod::enable() {
     auto& logger = getSelf().getLogger(); // 获取 Logger 实例
     logger.debug("Enabling..."); // 输出调试信息
 
-    // --- 数据库连接 (使用配置) ---
+    // --- 数据库连接 ---
     try {
         // 使用 getConfig() 获取已加载或默认的配置
         const auto& cfg = getConfig();
@@ -63,11 +61,11 @@ bool MyMod::enable() {
         logger.info("Database configuration: host={}, user={}, db={}, port={}",
                     cfg.db_host, cfg.db_user, cfg.db_name, cfg.db_port);
 
-        // 创建 MySQLConnection 实例 (使用 unique_ptr 管理生命周期)
+        // 创建 MySQLConnection 实例
         mDbConnection = std::make_unique<db::MySQLConnection>(
             cfg.db_host,
             cfg.db_user,
-            cfg.db_password, // 传递密码
+            cfg.db_password, 
             cfg.db_name,
             cfg.db_port
         );
@@ -101,22 +99,20 @@ bool MyMod::enable() {
 
         } else {
             logger.error("Database connection failed!"); // 连接失败
-            // 根据需要决定是否阻止插件启用
-            // return false;
+            // 阻止插件启用
+             return false;
         }
     } catch (const db::MySQLException& e) {
         // 捕获数据库特定异常
         logger.error("Database error during connection: {}", e.what());
-        // return false; // 连接失败，阻止启用
+        return false; // 连接失败，阻止启用
     } catch (const std::exception& e) {
         // 捕获其他标准异常
         logger.error("An unexpected error occurred during database connection: {}", e.what());
-        // return false;
+        return false;
     }
     // --- 数据库连接结束 ---
 
-
-    // 其他启用代码... (例如注册命令、监听事件等)
     return true; // 启用成功
 }
 
@@ -154,7 +150,6 @@ bool MyMod::disable() {
 MoneyManager& MyMod::getMoneyManager() {
     if (!mMoneyManager) { // 检查 MoneyManager 是否已初始化
         // 如果未初始化（可能插件未启用或初始化失败），抛出异常
-        // 或者使用更具体的异常类型，例如 std::logic_error
         throw std::runtime_error("MoneyManager is not initialized. Is the mod enabled?");
     }
     return *mMoneyManager; // 返回 MoneyManager 的引用

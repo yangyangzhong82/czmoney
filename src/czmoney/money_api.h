@@ -4,6 +4,7 @@
 #include <string_view> // 使用 string_view 提高效率
 #include <cstdint>
 #include <optional>
+#include <vector>      // 用于返回多个条目
 
 // 定义导出/导入宏
 // 当编译 czmoney 插件本身时，应定义 CZMONEY_API_EXPORTS
@@ -23,6 +24,23 @@
         #define CZMONEY_API
     #endif
 #endif
+
+namespace czmoney {
+// 前向声明或包含 TransactionLogEntry 定义
+// 如果在多个地方使用，最好放在一个共享的头文件中
+// 这里为了简单起见，直接定义在 API 头文件中
+struct TransactionLogEntry {
+    int64_t            id;
+    std::string        timestamp; // 使用字符串存储从数据库获取的时间戳
+    std::string        uuid;
+    std::string        currencyType;
+    int64_t            changeAmount;
+    int64_t            previousAmount;
+    std::optional<std::string> reason1; // 使用 optional 处理可能为 NULL 的字段
+    std::optional<std::string> reason2;
+    std::optional<std::string> reason3;
+};
+} // namespace czmoney
 
 namespace czmoney::api {
 
@@ -130,5 +148,35 @@ CZMONEY_API std::string formatBalance(int64_t amount);
  * @return std::optional<int64_t> 如果解析成功，返回整数余额；如果格式无效，返回 std::nullopt
  */
 CZMONEY_API std::optional<int64_t> parseBalance(std::string_view formattedAmount);
+
+/**
+ * @brief 查询经济交易流水日志
+ *
+ * 支持根据多种条件进行筛选。
+ * @param uuidFilter 可选，按玩家 UUID 筛选
+ * @param currencyTypeFilter 可选，按货币类型筛选
+ * @param startTimeFilter 可选，按起始时间筛选 (格式: "YYYY-MM-DD HH:MM:SS")
+ * @param endTimeFilter 可选，按结束时间筛选 (格式: "YYYY-MM-DD HH:MM:SS")
+ * @param reason1Filter 可选，按理由 1 筛选 (支持 LIKE '%value%')
+ * @param reason2Filter 可选，按理由 2 筛选 (支持 LIKE '%value%')
+ * @param reason3Filter 可选，按理由 3 筛选 (支持 LIKE '%value%')
+ * @param limit 返回的最大记录数，0 表示不限制
+ * @param offset 查询结果的偏移量，用于分页
+ * @param ascendingOrder 是否按时间升序排序 (默认为 false，即降序)
+ * @return std::vector<TransactionLogEntry> 包含符合条件的流水记录列表。查询失败或无结果时返回空列表。
+ */
+CZMONEY_API std::vector<TransactionLogEntry> queryTransactionLogs(
+    std::optional<std::string_view> uuidFilter = std::nullopt,
+    std::optional<std::string_view> currencyTypeFilter = std::nullopt,
+    std::optional<std::string_view> startTimeFilter = std::nullopt,
+    std::optional<std::string_view> endTimeFilter = std::nullopt,
+    std::optional<std::string_view> reason1Filter = std::nullopt,
+    std::optional<std::string_view> reason2Filter = std::nullopt,
+    std::optional<std::string_view> reason3Filter = std::nullopt,
+    size_t                          limit = 100, // 默认限制 100 条
+    size_t                          offset = 0,
+    bool                            ascendingOrder = false
+);
+
 
 } // namespace czmoney::api

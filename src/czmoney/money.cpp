@@ -1,4 +1,5 @@
 #include "czmoney/money.h"
+#include "czmoney/money_api.h" // 包含 API 头文件以获取 TransactionLogEntry 定义
 #include "czmoney/mysql.h"
 #include "ll/api/mod/NativeMod.h"
 #include "ll/api/memory/Hook.h"
@@ -130,10 +131,10 @@ int64_t MoneyManager::getMinimumBalance(const std::string& currencyType) const {
 }
 
 
-// MoneyManager 构造函数实现 (更新)
+// MoneyManager 构造函数实现
 MoneyManager::MoneyManager(db::MySQLConnection& dbConn, const Config& config) : // 添加 config 参数
     mDbConnection(dbConn), // 初始化数据库连接引用成员
-    mConfig(config),       // 初始化配置引用成员 (新增)
+    mConfig(config),       // 初始化配置引用成员 
     mLogger(ll::mod::NativeMod::current()->getLogger()) // 初始化日志记录器引用成员
 {
     // 构造时检查数据库连接状态
@@ -148,7 +149,7 @@ MoneyManager::MoneyManager(db::MySQLConnection& dbConn, const Config& config) : 
 bool MoneyManager::initializeTable() {
     // 检查数据库连接
     if (!mDbConnection.isConnected()) {
-        mLogger.error("无法初始化货币表：数据库未连接。"); // Log error if not connected
+        mLogger.error("无法初始化货币表：数据库未连接。"); 
         return false;
     }
 
@@ -1080,6 +1081,279 @@ std::optional<int64_t> MoneyManager::parseBalance(const std::string& formattedAm
         // 返回正值
         return totalCents;
     }
+}
+
+// --- 查询流水实现 ---
+std::vector<TransactionLogEntry> MoneyManager::queryTransactionLogs(
+    const std::optional<std::string>& uuidFilter,
+    const std::optional<std::string>& currencyTypeFilter,
+    const std::optional<std::string>& startTimeFilter,
+    const std::optional<std::string>& endTimeFilter,
+    const std::optional<std::string>& reason1Filter,
+    const std::optional<std::string>& reason2Filter,
+    const std::optional<std::string>& reason3Filter,
+    size_t                            limit,
+    size_t                            offset,
+    bool                              ascendingOrder
+) {
+    std::vector<TransactionLogEntry> results; // 用于存储结果
+
+    if (!mDbConnection.isConnected()) {
+        mLogger.error("无法查询流水：数据库未连接。");
+        // 可以选择抛出异常或返回空列表
+        // throw std::runtime_error("数据库未连接");
+        return results; // 返回空列表
+    }
+
+    MYSQL* mysql = mDbConnection.getMYSQL();
+    MYSQL_STMT* stmt = mysql_stmt_init(mysql);
+    if (!stmt) {
+        mLogger.error("mysql_stmt_init() 失败 (查询流水): {}", mysql_error(mysql));
+        throw std::runtime_error("无法初始化 MySQL 语句句柄");
+    }
+    StatementGuard stmtGuard(stmt); // RAII 确保关闭
+
+    // --- 动态构建 SQL 查询 ---
+    std::stringstream sqlBuilder;
+    sqlBuilder << "SELECT id, timestamp, uuid, currency_type, change_amount, previous_amount, reason1, reason2, reason3 FROM economy_log";
+
+    std::vector<std::string> whereClauses; // 存储 WHERE 条件
+    std::vector<std::string> paramValues;  // 存储需要绑定的参数值 (确保生命周期)
+    std::vector<MYSQL_BIND> params;        // 存储绑定信息
+    std::vector<unsigned long> paramLengths; // 存储字符串参数的长度
+
+    auto add_filter = [&](const std::optional<std::string>& filter, const std::string& columnName, bool useLike = false) {
+        if (filter.has_value() && !filter.value().empty()) {
+            paramValues.push_back(filter.value()); // 存储参数值
+            paramLengths.push_back(static_cast<unsigned long>(paramValues.back().length()));
+
+            MYSQL_BIND bind = {};
+            bind.buffer_type = MYSQL_TYPE_STRING;
+            bind.buffer = const_cast<char*>(paramValues.back().c_str());
+            bind.buffer_length = paramLengths.back(); // 缓冲区长度
+            bind.length = &paramLengths.back();       // 实际长度指针
+            params.push_back(bind);
+
+            if (useLike) {
+                // 对于 LIKE 查询，需要修改参数值并在 SQL 中使用 LIKE
+                paramValues.back() = "%" + paramValues.back() + "%";
+                paramLengths.back() = static_cast<unsigned long>(paramValues.back().length()); // 更新长度
+                bind.buffer = const_cast<char*>(paramValues.back().c_str()); // 更新指针
+                bind.buffer_length = paramLengths.back();
+                bind.length = &paramLengths.back();
+                // 更新 params vector 中的 bind (如果已经 push_back)
+                if (!params.empty()) params.back() = bind;
+
+                whereClauses.push_back(columnName + " LIKE ?");
+            } else {
+                whereClauses.push_back(columnName + " = ?");
+            }
+        }
+    };
+
+    add_filter(uuidFilter, "uuid");
+    add_filter(currencyTypeFilter, "currency_type");
+    add_filter(startTimeFilter, "timestamp", false); // 使用 >=
+    if (startTimeFilter.has_value() && !startTimeFilter.value().empty()) {
+         // 查找最后一个 "timestamp = ?" 并替换为 "timestamp >= ?"
+         for (auto it = whereClauses.rbegin(); it != whereClauses.rend(); ++it) {
+             if (*it == "timestamp = ?") {
+                 *it = "timestamp >= ?";
+                 break;
+             }
+         }
+    }
+    add_filter(endTimeFilter, "timestamp", false); // 使用 <=
+     if (endTimeFilter.has_value() && !endTimeFilter.value().empty()) {
+         // 查找最后一个 "timestamp = ?" 并替换为 "timestamp <= ?"
+         for (auto it = whereClauses.rbegin(); it != whereClauses.rend(); ++it) {
+             if (*it == "timestamp = ?") {
+                 *it = "timestamp <= ?";
+                 break;
+             }
+         }
+    }
+    add_filter(reason1Filter, "reason1", true); // 使用 LIKE
+    add_filter(reason2Filter, "reason2", true); // 使用 LIKE
+    add_filter(reason3Filter, "reason3", true); // 使用 LIKE
+
+    // 组合 WHERE 子句
+    if (!whereClauses.empty()) {
+        sqlBuilder << " WHERE ";
+        for (size_t i = 0; i < whereClauses.size(); ++i) {
+            sqlBuilder << whereClauses[i] << (i < whereClauses.size() - 1 ? " AND " : "");
+        }
+    }
+
+    // 添加 ORDER BY 子句
+    sqlBuilder << " ORDER BY timestamp " << (ascendingOrder ? "ASC" : "DESC");
+
+    // 添加 LIMIT 和 OFFSET 子句
+    // 注意：LIMIT 和 OFFSET 不能直接用 ? 占位符绑定，需要直接拼接到 SQL 字符串中
+    // 但要确保它们是有效的数字，防止注入
+    if (limit > 0) {
+        sqlBuilder << " LIMIT " << limit;
+        // OFFSET 只有在 LIMIT 存在时才有意义
+        if (offset > 0) {
+            sqlBuilder << " OFFSET " << offset;
+        }
+    }
+    sqlBuilder << ";"; // SQL 语句结束
+
+    std::string finalSql = sqlBuilder.str();
+    mLogger.debug("Executing SQL for queryTransactionLogs: {}", finalSql); // 记录最终 SQL
+
+    // --- 准备语句 ---
+    if (mysql_stmt_prepare(stmt, finalSql.c_str(), static_cast<unsigned long>(finalSql.length()))) {
+        mLogger.error("mysql_stmt_prepare() 失败 (查询流水): {}", mysql_stmt_error(stmt));
+        throw std::runtime_error("准备查询流水语句失败: " + std::string(mysql_stmt_error(stmt)));
+    }
+
+    // --- 绑定参数 ---
+    if (!params.empty()) {
+        if (mysql_stmt_bind_param(stmt, params.data())) {
+            mLogger.error("mysql_stmt_bind_param() 失败 (查询流水): {}", mysql_stmt_error(stmt));
+            throw std::runtime_error("绑定查询流水参数失败: " + std::string(mysql_stmt_error(stmt)));
+        }
+    }
+
+    // --- 执行语句 ---
+    if (mysql_stmt_execute(stmt)) {
+        mLogger.error("mysql_stmt_execute() 失败 (查询流水): {}", mysql_stmt_error(stmt));
+        throw std::runtime_error("执行查询流水语句失败: " + std::string(mysql_stmt_error(stmt)));
+    }
+
+    // --- 绑定结果列 ---
+    MYSQL_BIND resultBinds[9]; // 9 个结果列
+    memset(resultBinds, 0, sizeof(resultBinds));
+
+    int64_t res_id = 0;
+    char res_timestamp[20]; // Sufficient for "YYYY-MM-DD HH:MM:SS"
+    unsigned long len_timestamp = 0;
+    char res_uuid[37]; // UUID length + null terminator
+    unsigned long len_uuid = 0;
+    char res_currency_type[51]; // Max length + null terminator
+    unsigned long len_currency_type = 0;
+    int64_t res_change_amount = 0;
+    int64_t res_previous_amount = 0;
+    char res_reason1[256]; // Max length + null terminator
+    unsigned long len_reason1 = 0;
+    bool is_null_reason1 = false;
+    char res_reason2[256];
+    unsigned long len_reason2 = 0;
+    bool is_null_reason2 = false;
+    char res_reason3[256];
+    unsigned long len_reason3 = 0;
+    bool is_null_reason3 = false;
+    bool error_flags[9] = {false}; // 用于检查每列获取时是否出错
+
+    resultBinds[0].buffer_type = MYSQL_TYPE_LONGLONG;
+    resultBinds[0].buffer = &res_id;
+    resultBinds[0].error = &error_flags[0];
+
+    resultBinds[1].buffer_type = MYSQL_TYPE_STRING; // TIMESTAMP 通常作为字符串获取
+    resultBinds[1].buffer = res_timestamp;
+    resultBinds[1].buffer_length = sizeof(res_timestamp);
+    resultBinds[1].length = &len_timestamp;
+    resultBinds[1].error = &error_flags[1];
+
+    resultBinds[2].buffer_type = MYSQL_TYPE_STRING;
+    resultBinds[2].buffer = res_uuid;
+    resultBinds[2].buffer_length = sizeof(res_uuid);
+    resultBinds[2].length = &len_uuid;
+    resultBinds[2].error = &error_flags[2];
+
+    resultBinds[3].buffer_type = MYSQL_TYPE_STRING;
+    resultBinds[3].buffer = res_currency_type;
+    resultBinds[3].buffer_length = sizeof(res_currency_type);
+    resultBinds[3].length = &len_currency_type;
+    resultBinds[3].error = &error_flags[3];
+
+    resultBinds[4].buffer_type = MYSQL_TYPE_LONGLONG;
+    resultBinds[4].buffer = &res_change_amount;
+    resultBinds[4].error = &error_flags[4];
+
+    resultBinds[5].buffer_type = MYSQL_TYPE_LONGLONG;
+    resultBinds[5].buffer = &res_previous_amount;
+    resultBinds[5].error = &error_flags[5];
+
+    resultBinds[6].buffer_type = MYSQL_TYPE_STRING;
+    resultBinds[6].buffer = res_reason1;
+    resultBinds[6].buffer_length = sizeof(res_reason1);
+    resultBinds[6].length = &len_reason1;
+    resultBinds[6].is_null = &is_null_reason1;
+    resultBinds[6].error = &error_flags[6];
+
+    resultBinds[7].buffer_type = MYSQL_TYPE_STRING;
+    resultBinds[7].buffer = res_reason2;
+    resultBinds[7].buffer_length = sizeof(res_reason2);
+    resultBinds[7].length = &len_reason2;
+    resultBinds[7].is_null = &is_null_reason2;
+    resultBinds[7].error = &error_flags[7];
+
+    resultBinds[8].buffer_type = MYSQL_TYPE_STRING;
+    resultBinds[8].buffer = res_reason3;
+    resultBinds[8].buffer_length = sizeof(res_reason3);
+    resultBinds[8].length = &len_reason3;
+    resultBinds[8].is_null = &is_null_reason3;
+    resultBinds[8].error = &error_flags[8];
+
+    if (mysql_stmt_bind_result(stmt, resultBinds)) {
+        mLogger.error("mysql_stmt_bind_result() 失败 (查询流水): {}", mysql_stmt_error(stmt));
+        throw std::runtime_error("绑定查询流水结果失败: " + std::string(mysql_stmt_error(stmt)));
+    }
+
+    // --- 获取结果 ---
+    // 必须调用 mysql_stmt_store_result 以便稍后获取行数，并允许在 fetch 循环中安全地访问数据
+    if (mysql_stmt_store_result(stmt)) {
+        mLogger.error("mysql_stmt_store_result() 失败 (查询流水): {}", mysql_stmt_error(stmt));
+        throw std::runtime_error("存储查询流水结果失败: " + std::string(mysql_stmt_error(stmt)));
+    }
+
+    my_ulonglong num_rows = mysql_stmt_num_rows(stmt);
+    mLogger.debug("查询流水找到 {} 条记录", num_rows);
+
+    while (mysql_stmt_fetch(stmt) == 0) { // 0 表示成功获取一行
+        TransactionLogEntry entry;
+        entry.id = res_id;
+        entry.timestamp = std::string(res_timestamp, len_timestamp);
+        entry.uuid = std::string(res_uuid, len_uuid);
+        entry.currencyType = std::string(res_currency_type, len_currency_type);
+        entry.changeAmount = res_change_amount;
+        entry.previousAmount = res_previous_amount;
+
+        if (!is_null_reason1) entry.reason1 = std::string(res_reason1, len_reason1);
+        if (!is_null_reason2) entry.reason2 = std::string(res_reason2, len_reason2);
+        if (!is_null_reason3) entry.reason3 = std::string(res_reason3, len_reason3);
+
+        // 检查是否有列获取错误
+        bool fetchError = false;
+        for(int i=0; i<9; ++i) {
+            if(error_flags[i]) {
+                mLogger.error("获取流水结果列 {} 时出错", i);
+                fetchError = true;
+                break; // 只报告第一个错误
+            }
+        }
+        if(fetchError) {
+            // 抛出异常
+            mLogger.error("跳过获取错误的流水记录 ID: {}", res_id);
+            continue;
+        }
+
+        results.push_back(std::move(entry)); // 使用移动语义提高效率
+    }
+
+    // 检查 fetch 循环结束的原因
+    if (mysql_stmt_errno(stmt) != 0 && mysql_stmt_errno(stmt) != MYSQL_NO_DATA) {
+         mLogger.error("mysql_stmt_fetch() 循环结束后出错 (查询流水): {}", mysql_stmt_error(stmt));
+         // 可能需要根据错误类型决定是否抛出异常
+    }
+
+    // 释放存储的结果集 (如果调用了 mysql_stmt_store_result)
+    mysql_stmt_free_result(stmt);
+
+    return results;
 }
 
 

@@ -20,7 +20,7 @@ struct MoneyQuerySelectorArgs {
     ll::command::SoftEnum<CurrencyTypeEnum> currencyType;   // 修改类型: 货币类型 (可选)
 };
 
-// 新增: 用于查询离线玩家余额
+// 用于查询离线玩家余额
 struct MoneyQueryOfflineArgs {
     std::string             playerName;     // 玩家名称
     ll::command::SoftEnum<CurrencyTypeEnum> currencyType;   // 货币类型 (可选)
@@ -33,7 +33,7 @@ struct MoneySetSelectorArgs {
     ll::command::SoftEnum<CurrencyTypeEnum> currencyType;   // 修改类型: 货币类型 (可选)
 };
 
-// 新增: 用于设置离线玩家余额
+// 用于设置离线玩家余额
 struct MoneySetOfflineArgs {
     std::string             playerName;     // 玩家名称
     float                   amount;         // 金额 (浮点数形式)
@@ -47,7 +47,7 @@ struct MoneyAddSelectorArgs {
     ll::command::SoftEnum<CurrencyTypeEnum> currencyType;   // 修改类型: 货币类型 (可选)
 };
 
-// 新增: 用于增加离线玩家余额
+// 用于增加离线玩家余额
 struct MoneyAddOfflineArgs {
     std::string             playerName;     // 玩家名称
     float                   amount;         // 金额 (浮点数形式)
@@ -61,7 +61,7 @@ struct MoneyReduceSelectorArgs {
     ll::command::SoftEnum<CurrencyTypeEnum> currencyType;   // 修改类型: 货币类型 (可选)
 };
 
-// 新增: 用于减少离线玩家余额
+// 用于减少离线玩家余额
 struct MoneyReduceOfflineArgs {
     std::string             playerName;     // 玩家名称
     float                   amount;         // 金额 (浮点数形式)

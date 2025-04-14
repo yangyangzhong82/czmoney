@@ -1,12 +1,13 @@
-#include "czmoney/money_api.h" // 包含我们刚刚创建的 API 头文件
-#include "czmoney/MyMod.h"     // 需要访问 MyMod 单例以获取 MoneyManager
-#include "czmoney/money.h"     // 需要调用 MoneyManager 的方法
-#include "ll/api/io/Logger.h" // 用于记录日志
-#include <stdexcept>       // 用于捕获异常
-#include <string>          // MoneyManager 使用 std::string
-#include <cmath>           // 用于 std::isnan, std::isinf, std::round
-#include <limits>          // 用于 std::numeric_limits
-#include <optional>        // 用于 std::optional
+#include "czmoney/money_api.h" 
+#include "czmoney/MyMod.h"     
+#include "czmoney/money.h"     
+#include "ll/api/io/Logger.h" 
+#include <stdexcept>      
+#include <string>         
+#include <cmath>           
+#include <limits>         
+#include <optional>        
+#include <vector>      
 
 // 辅助函数，用于安全地获取 MoneyManager 实例并处理异常
 inline czmoney::MoneyManager* getMoneyManagerInstance() {
@@ -21,7 +22,7 @@ inline czmoney::MoneyManager* getMoneyManagerInstance() {
     }
 }
 
-// 新增辅助函数：将 double 金额转换为 int64_t (分)，并进行校验 (截断)
+// 辅助函数：将 double 金额转换为 int64_t (分)，并进行校验 (截断)
 std::optional<int64_t> convertDoubleToInt64(double amount, bool requirePositive = false) {
     // 1. 检查 NaN 和 Infinity
     if (std::isnan(amount) || std::isinf(amount)) {
@@ -45,8 +46,7 @@ std::optional<int64_t> convertDoubleToInt64(double amount, bool requirePositive 
     }
      // 对于 set，允许负数，但检查一下
      if (!requirePositive && amount < 0.0) {
-         // 允许负数，无需特殊处理，但可以加日志
-         // try { czmoney::MyMod::getInstance().getSelf().getLogger().debug("API setPlayerBalance 收到负金额: {}", amount); } catch (...) {}
+         try { czmoney::MyMod::getInstance().getSelf().getLogger().debug("API setPlayerBalance 收到负金额: {}", amount); } catch (...) {}
      }
 
 
@@ -212,5 +212,53 @@ std::optional<int64_t> parseBalance(std::string_view formattedAmount) {
     // 注意：将 string_view 转换为 string
     return czmoney::MoneyManager::parseBalance(std::string(formattedAmount));
 }
+
+// 实现查询流水 API
+std::vector<TransactionLogEntry> queryTransactionLogs(
+    std::optional<std::string_view> uuidFilter,
+    std::optional<std::string_view> currencyTypeFilter,
+    std::optional<std::string_view> startTimeFilter,
+    std::optional<std::string_view> endTimeFilter,
+    std::optional<std::string_view> reason1Filter,
+    std::optional<std::string_view> reason2Filter,
+    std::optional<std::string_view> reason3Filter,
+    size_t                          limit,
+    size_t                          offset,
+    bool                            ascendingOrder
+) {
+    if (auto* manager = getMoneyManagerInstance()) {
+        // 将 string_view 转换为 string (如果 MoneyManager 接口需要)
+        // 注意：MoneyManager 的 queryTransactionLogs 尚未实现，这里假设其接口
+        // 使用 std::optional<std::string> 作为过滤器类型
+        auto convert_sv_opt_to_s_opt = [](const std::optional<std::string_view>& sv_opt) -> std::optional<std::string> {
+            if (sv_opt) {
+                return std::string(sv_opt.value());
+            }
+            return std::nullopt;
+        };
+
+        try {
+            return manager->queryTransactionLogs(
+                convert_sv_opt_to_s_opt(uuidFilter),
+                convert_sv_opt_to_s_opt(currencyTypeFilter),
+                convert_sv_opt_to_s_opt(startTimeFilter),
+                convert_sv_opt_to_s_opt(endTimeFilter),
+                convert_sv_opt_to_s_opt(reason1Filter),
+                convert_sv_opt_to_s_opt(reason2Filter),
+                convert_sv_opt_to_s_opt(reason3Filter),
+                limit,
+                offset,
+                ascendingOrder
+            );
+        } catch (const std::exception& e) {
+            try {
+                czmoney::MyMod::getInstance().getSelf().getLogger().error("queryTransactionLogs API 调用失败: {}", e.what());
+            } catch (...) {}
+            return {}; // 返回空向量表示失败
+        }
+    }
+    return {}; // 获取 manager 失败，返回空向量
+}
+
 
 } // namespace czmoney::api
