@@ -78,9 +78,55 @@ public:
 
 // --- 私有辅助函数实现 ---
 
+// 新增：安全地将 double 金额转换为 int64_t (分)
+std::optional<int64_t> MoneyManager::convertDoubleToInt64(double amount, const std::string& context) const {
+    // 1. 检查 NaN 和 Infinity
+    if (std::isnan(amount) || std::isinf(amount)) {
+        mLogger.error("配置中的无效 {} 值 (NaN 或 Infinity): {}", context, amount);
+        return std::nullopt;
+    }
+
+    // 2. 转换为分 (使用截断)
+    double centsDouble = amount * 100.0;
+
+    // 3. 检查转换后的值是否在 int64_t 范围内 (截断前的检查)
+    const double min_representable = static_cast<double>(std::numeric_limits<int64_t>::min());
+    const double max_representable_plus_one = static_cast<double>(std::numeric_limits<int64_t>::max()) + 1.0; // 加 1.0 考虑截断
+
+    if (centsDouble < min_representable || centsDouble >= max_representable_plus_one) {
+        mLogger.error("配置中的 {} 值 {} 转换后超出 int64_t 可表示范围", context, amount);
+        return std::nullopt;
+    }
+
+    // 4. 安全地转换为 int64_t (执行截断)
+    return static_cast<int64_t>(centsDouble);
+}
+
+
 // 检查货币类型是否已配置
 bool MoneyManager::isCurrencyConfigured(const std::string& currencyType) const {
     return mConfig.economy.count(currencyType) > 0;
+}
+
+// 更新：获取指定货币类型的最低余额 (从 double 转换)
+int64_t MoneyManager::getMinimumBalance(const std::string& currencyType) const {
+    auto it = mConfig.economy.find(currencyType);
+    if (it != mConfig.economy.end()) {
+        // 从配置获取 double 值
+        double minBalanceDouble = it->second.minimumBalance;
+        // 转换并验证
+        std::optional<int64_t> minBalanceInt = convertDoubleToInt64(minBalanceDouble, "minimumBalance for " + currencyType);
+        if (minBalanceInt.has_value()) {
+            return minBalanceInt.value();
+        } else {
+            // 转换失败，记录错误并返回默认值 0
+            mLogger.error("无法转换配置中货币类型 '{}' 的 minimumBalance ({})，将使用默认值 0。", currencyType, minBalanceDouble);
+            return 0LL;
+        }
+    }
+    // 如果未找到特定配置，记录警告并返回默认值 0
+    mLogger.warn("未在配置中找到货币类型 '{}' 的最低余额设置，将使用默认值 0。", currencyType);
+    return 0LL;
 }
 
 
@@ -136,8 +182,49 @@ bool MoneyManager::initializeTable() {
 
     // 记录成功信息
     mLogger.info("'player_balances' 表初始化成功。");
+
+    // 初始化流水日志表
+    if (!initializeLogTable()) {
+        mLogger.error("初始化 'economy_log' 表失败。");
+        return false; // 如果日志表初始化失败，整个初始化也失败
+    }
+
     return true; // 初始化成功
 }
+
+// 新增：初始化经济流水日志表的实现
+bool MoneyManager::initializeLogTable() {
+    if (!mDbConnection.isConnected()) {
+        mLogger.error("无法初始化流水表：数据库未连接。");
+        return false;
+    }
+
+    const char* createLogTableSQL = R"(
+        CREATE TABLE IF NOT EXISTS economy_log (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            uuid VARCHAR(36) NOT NULL,
+            currency_type VARCHAR(50) NOT NULL,
+            change_amount BIGINT NOT NULL,
+            previous_amount BIGINT NOT NULL,
+            reason1 VARCHAR(255) DEFAULT NULL,
+            reason2 VARCHAR(255) DEFAULT NULL,
+            reason3 VARCHAR(255) DEFAULT NULL,
+            INDEX idx_uuid (uuid),
+            INDEX idx_currency_type (currency_type),
+            INDEX idx_timestamp (timestamp)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    )";
+
+    if (mDbConnection.query(createLogTableSQL) != 0) {
+        mLogger.error("创建或验证 'economy_log' 表失败: {}", mysql_error(mDbConnection.getMYSQL()));
+        return false;
+    }
+
+    mLogger.info("'economy_log' 表初始化成功。");
+    return true;
+}
+
 
 // 检查玩家账户是否存在的实现
 bool MoneyManager::hasAccount(const std::string& uuid, const std::string& currencyType) {
@@ -248,32 +335,38 @@ std::optional<int64_t> MoneyManager::getPlayerBalance(const std::string& uuid, c
     }
 }
 
-// 新增：初始化账户的私有辅助函数实现
+// 更新：初始化账户的私有辅助函数实现 (从 double 转换)
 std::optional<int64_t> MoneyManager::initializeAccount(const std::string& uuid, const std::string& currencyType) {
     // 0. 检查货币类型是否已配置
     if (!isCurrencyConfigured(currencyType)) {
         mLogger.error("无法初始化账户：货币类型 '{}' 未在配置中定义。", currencyType);
-        return std::nullopt; // 返回空 optional 表示失败
+        return std::nullopt;
     }
 
-    // 1. 从配置中获取初始余额
-    int64_t initialAmount = 0; // 默认初始值为 0
-    auto it = mConfig.economy.find(currencyType); // 从新的 economy map 中查找
+    // 1. 从配置中获取初始余额 (double)
+    double initialAmountDouble = 0.0; // 默认初始值为 0.0
+    auto it = mConfig.economy.find(currencyType);
     if (it != mConfig.economy.end()) {
-        // 找到了对应货币类型的配置
-        initialAmount = it->second.initialBalance; // 获取 CurrencyConfig 中的 initialBalance
+        initialAmountDouble = it->second.initialBalance;
     } else {
-        // 未找到特定货币类型的配置，使用默认值 0
-        mLogger.warn("未在配置的 'economy' 部分找到货币类型 '{}' 的设置，将使用默认初始余额 0。", currencyType);
-        // 注意：这里也可以选择从一个全局默认值读取，如果 Config 结构体未来添加了类似 defaultInitialBalance 的字段
+        mLogger.warn("未在配置的 'economy' 部分找到货币类型 '{}' 的设置，将使用默认初始余额 0.0。", currencyType);
     }
 
-    // 2. 使用 setPlayerBalance 插入新记录
-    mLogger.info("为 UUID: {}, Currency: {} 初始化账户，初始余额: {}", uuid, currencyType, formatBalance(initialAmount));
-    if (setPlayerBalance(uuid, currencyType, initialAmount)) {
-        return initialAmount; // 初始化成功，返回初始金额
+    // 2. 转换初始余额为 int64_t
+    std::optional<int64_t> initialAmountIntOpt = convertDoubleToInt64(initialAmountDouble, "initialBalance for " + currencyType);
+    if (!initialAmountIntOpt.has_value()) {
+        mLogger.error("无法转换配置中货币类型 '{}' 的 initialBalance ({})，初始化账户失败。", currencyType, initialAmountDouble);
+        return std::nullopt; // 转换失败
+    }
+    int64_t initialAmountInt = initialAmountIntOpt.value();
+
+    // 3. 使用 setPlayerBalance 插入新记录 (传入转换后的 int64_t 值)
+    mLogger.info("为 UUID: {}, Currency: {} 初始化账户，初始余额: {}", uuid, currencyType, formatBalance(initialAmountInt));
+    // 调用 setPlayerBalance 时，它内部会再次检查最低余额（现在 getMinimumBalance 会返回转换后的 int64_t）
+    if (setPlayerBalance(uuid, currencyType, initialAmountInt)) { // 传入 int64_t
+        return initialAmountInt; // 初始化成功，返回转换后的初始金额
     } else {
-        mLogger.error("为 UUID: {}, Currency: {} 初始化账户失败。", uuid, currencyType);
+        mLogger.error("为 UUID: {}, Currency: {} 初始化账户失败 (setPlayerBalance 调用失败)。", uuid, currencyType);
         return std::nullopt; // 初始化失败
     }
 }
@@ -303,111 +396,288 @@ int64_t MoneyManager::getPlayerBalanceOrInit(const std::string& uuid, const std:
     }
 }
 
+// 新增：记录经济交易流水的实现
+bool MoneyManager::logTransaction(
+    const std::string& uuid,
+    const std::string& currencyType,
+    int64_t            changeAmount,
+    int64_t            previousAmount,
+    const std::string& reason1,
+    const std::string& reason2,
+    const std::string& reason3
+) {
+    // 如果变动为 0，可以选择不记录日志
+    if (changeAmount == 0) {
+        return true; // 视为成功，但不记录
+    }
 
-// 设置玩家余额的实现
-bool MoneyManager::setPlayerBalance(const std::string& uuid, const std::string& currencyType, int64_t amount) {
-    // 0. 检查货币类型是否已配置
-    if (!isCurrencyConfigured(currencyType)) {
-        mLogger.error("无法设置余额：货币类型 '{}' 未在配置中定义。", currencyType);
+    if (!mDbConnection.isConnected()) {
+        mLogger.error("无法记录流水：数据库未连接。");
         return false;
     }
 
-    // 检查数据库连接
-    if (!mDbConnection.isConnected()) {
-        mLogger.error("无法设置余额：数据库未连接。");
-        return false; // 连接失败 (修正了重复的 return false)
-    }
-
-    MYSQL* mysql = mDbConnection.getMYSQL(); // 获取底层连接
-    MYSQL_STMT* stmt = mysql_stmt_init(mysql); // 初始化语句句柄
+    MYSQL* mysql = mDbConnection.getMYSQL();
+    MYSQL_STMT* stmt = mysql_stmt_init(mysql);
     if (!stmt) {
-        mLogger.error("mysql_stmt_init() 失败: {}", mysql_error(mysql));
-        return false; // 初始化失败
+        mLogger.error("mysql_stmt_init() 失败 (记录流水): {}", mysql_error(mysql));
+        return false;
     }
-    StatementGuard stmtGuard(stmt); // RAII 管理语句生命周期
+    StatementGuard stmtGuard(stmt);
 
-    // 使用 INSERT ... ON DUPLICATE KEY UPDATE 实现 "upsert"（插入或更新）逻辑
-    // 如果 (uuid, currency_type) 的组合键已存在，则更新 amount 字段为新值 (VALUES(amount))
-    // 否则，插入新行
     const std::string sql = R"(
-        INSERT INTO player_balances (uuid, currency_type, amount)
-        VALUES (?, ?, ?)
-        ON DUPLICATE KEY UPDATE amount = VALUES(amount);
+        INSERT INTO economy_log (uuid, currency_type, change_amount, previous_amount, reason1, reason2, reason3)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
     )";
 
-    // 准备 SQL 语句
     if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.length()))) {
-        mLogger.error("mysql_stmt_prepare() 失败 (设置余额): {}", mysql_stmt_error(stmt));
-        return false; // 准备失败
+        mLogger.error("mysql_stmt_prepare() 失败 (记录流水): {}", mysql_stmt_error(stmt));
+        return false;
     }
 
     // --- 绑定输入参数 ---
-    MYSQL_BIND params[3]; // 3 个参数：uuid, currencyType, amount
-    memset(params, 0, sizeof(params)); // 初始化
+    MYSQL_BIND params[7]; // 7 个参数
+    memset(params, 0, sizeof(params));
 
-    // 绑定 uuid (字符串)
     unsigned long uuidLen = static_cast<unsigned long>(uuid.length());
     params[0].buffer_type = MYSQL_TYPE_STRING;
     params[0].buffer = const_cast<char*>(uuid.c_str());
     params[0].buffer_length = uuidLen;
     params[0].length = &uuidLen;
 
-    // 绑定 currencyType (字符串)
     unsigned long currencyTypeLen = static_cast<unsigned long>(currencyType.length());
     params[1].buffer_type = MYSQL_TYPE_STRING;
     params[1].buffer = const_cast<char*>(currencyType.c_str());
     params[1].buffer_length = currencyTypeLen;
     params[1].length = &currencyTypeLen;
 
-    // 绑定 amount (长整型, BIGINT)
-    params[2].buffer_type = MYSQL_TYPE_LONGLONG; // 类型
-    params[2].buffer = &amount; // 指向 amount 变量的指针
-    params[2].is_unsigned = false; // 金额是有符号的 (int64_t)
+    params[2].buffer_type = MYSQL_TYPE_LONGLONG;
+    params[2].buffer = &changeAmount;
+    params[2].is_unsigned = false;
 
-    // 将参数绑定到语句
+    params[3].buffer_type = MYSQL_TYPE_LONGLONG;
+    params[3].buffer = &previousAmount;
+    params[3].is_unsigned = false;
+
+    // 绑定理由，处理空字符串的情况 (插入 NULL)
+    unsigned long reason1Len = static_cast<unsigned long>(reason1.length());
+    bool reason1_is_null = reason1.empty();
+    params[4].buffer_type = MYSQL_TYPE_STRING;
+    params[4].buffer = const_cast<char*>(reason1.c_str());
+    params[4].buffer_length = reason1Len;
+    params[4].length = &reason1Len;
+    params[4].is_null = &reason1_is_null;
+
+    unsigned long reason2Len = static_cast<unsigned long>(reason2.length());
+    bool reason2_is_null = reason2.empty();
+    params[5].buffer_type = MYSQL_TYPE_STRING;
+    params[5].buffer = const_cast<char*>(reason2.c_str());
+    params[5].buffer_length = reason2Len;
+    params[5].length = &reason2Len;
+    params[5].is_null = &reason2_is_null;
+
+    unsigned long reason3Len = static_cast<unsigned long>(reason3.length());
+    bool reason3_is_null = reason3.empty();
+    params[6].buffer_type = MYSQL_TYPE_STRING;
+    params[6].buffer = const_cast<char*>(reason3.c_str());
+    params[6].buffer_length = reason3Len;
+    params[6].length = &reason3Len;
+    params[6].is_null = &reason3_is_null;
+
+
     if (mysql_stmt_bind_param(stmt, params)) {
-        mLogger.error("mysql_stmt_bind_param() 失败 (设置余额): {}", mysql_stmt_error(stmt));
-        return false; // 绑定失败
+        mLogger.error("mysql_stmt_bind_param() 失败 (记录流水): {}", mysql_stmt_error(stmt));
+        return false;
     }
     // --- 输入参数绑定结束 ---
 
-    // 执行语句
+    if (mysql_stmt_execute(stmt)) {
+        mLogger.error("mysql_stmt_execute() 失败 (记录流水): {}", mysql_stmt_error(stmt));
+        return false;
+    }
+
+    // 检查受影响的行数，确保插入成功
+    my_ulonglong affected_rows = mysql_stmt_affected_rows(stmt);
+    if (affected_rows != 1) {
+        mLogger.warn("记录流水影响了 {} 行 (预期为 1)。UUID: {}, Currency: {}", affected_rows, uuid, currencyType);
+        // 根据策略，这里可以返回 false，或者仅记录警告
+        // return false;
+    }
+
+    mLogger.debug("成功记录流水: UUID={}, Type={}, Change={}, Prev={}, R1={}, R2={}, R3={}",
+                  uuid, currencyType, formatBalance(changeAmount), formatBalance(previousAmount),
+                  reason1.empty() ? "NULL" : reason1,
+                  reason2.empty() ? "NULL" : reason2,
+                  reason3.empty() ? "NULL" : reason3);
+
+    return true;
+}
+
+
+// 设置玩家余额的实现 (更新)
+bool MoneyManager::setPlayerBalance(
+    const std::string& uuid,
+    const std::string& currencyType,
+    int64_t            amount,
+    const std::string& reason1,
+    const std::string& reason2,
+    const std::string& reason3
+) {
+    // 0. 检查货币类型是否已配置
+    if (!isCurrencyConfigured(currencyType)) {
+        mLogger.error("无法设置余额：货币类型 '{}' 未在配置中定义。", currencyType);
+        return false;
+    }
+
+    // 新增：检查设置金额是否低于最低值
+    int64_t minBalance = getMinimumBalance(currencyType);
+    if (amount < minBalance) {
+        mLogger.error(
+            "无法设置余额：尝试为 UUID: {}, Currency: {} 设置金额 {}，低于最低允许值 {}",
+            uuid,
+            currencyType,
+            formatBalance(amount),
+            formatBalance(minBalance)
+        );
+        return false;
+    }
+
+    // 检查数据库连接
+    if (!mDbConnection.isConnected()) {
+        mLogger.error("无法设置余额：数据库未连接。");
+        return false;
+    }
+
+    // --- 获取操作前的余额，用于记录流水 ---
+    int64_t previousBalance = 0; // 默认为 0
+    std::optional<int64_t> previousBalanceOpt = getPlayerBalance(uuid, currencyType);
+    if (previousBalanceOpt.has_value()) {
+        previousBalance = previousBalanceOpt.value();
+    } else {
+        // 如果账户不存在，尝试获取配置的初始值作为“之前”的值
+        // 这主要用于记录 set 操作创建新账户时的流水
+        auto it = mConfig.economy.find(currencyType);
+        if (it != mConfig.economy.end()) {
+            // 使用辅助函数安全转换配置中的 double 初始值
+            std::optional<int64_t> initialBalanceIntOpt = convertDoubleToInt64(
+                it->second.initialBalance,
+                "initialBalance for " + currencyType + " (in setPlayerBalance fallback)"
+            );
+            if (initialBalanceIntOpt.has_value()) {
+                previousBalance = initialBalanceIntOpt.value();
+            } else {
+                // 如果转换失败（例如配置值无效），保持 previousBalance 为 0 并记录错误
+                mLogger.error(
+                    "无法转换配置中货币类型 '{}' 的 initialBalance ({}) 作为 setPlayerBalance 的 previousBalance 回退值。",
+                    currencyType,
+                    it->second.initialBalance
+                );
+                // previousBalance 保持 0
+            }
+        }
+        // 如果连配置都没有，previousBalance 保持 0
+    }
+    // --- 获取操作前余额结束 ---
+
+    // --- 执行数据库更新 ---
+    MYSQL* mysql = mDbConnection.getMYSQL();
+    MYSQL_STMT* stmt = mysql_stmt_init(mysql);
+    if (!stmt) {
+        mLogger.error("mysql_stmt_init() 失败 (设置余额): {}", mysql_error(mysql));
+        return false;
+    }
+    StatementGuard stmtGuard(stmt);
+
+    const std::string sql = R"(
+        INSERT INTO player_balances (uuid, currency_type, amount)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE amount = VALUES(amount);
+    )";
+
+    if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.length()))) {
+        mLogger.error("mysql_stmt_prepare() 失败 (设置余额): {}", mysql_stmt_error(stmt));
+        return false;
+    }
+
+    MYSQL_BIND params[3];
+    memset(params, 0, sizeof(params));
+
+    unsigned long uuidLen = static_cast<unsigned long>(uuid.length());
+    params[0].buffer_type = MYSQL_TYPE_STRING;
+    params[0].buffer = const_cast<char*>(uuid.c_str());
+    params[0].buffer_length = uuidLen;
+    params[0].length = &uuidLen;
+
+    unsigned long currencyTypeLen = static_cast<unsigned long>(currencyType.length());
+    params[1].buffer_type = MYSQL_TYPE_STRING;
+    params[1].buffer = const_cast<char*>(currencyType.c_str());
+    params[1].buffer_length = currencyTypeLen;
+    params[1].length = &currencyTypeLen;
+
+    params[2].buffer_type = MYSQL_TYPE_LONGLONG;
+    params[2].buffer = &amount;
+    params[2].is_unsigned = false;
+
+    if (mysql_stmt_bind_param(stmt, params)) {
+        mLogger.error("mysql_stmt_bind_param() 失败 (设置余额): {}", mysql_stmt_error(stmt));
+        return false;
+    }
+
     if (mysql_stmt_execute(stmt)) {
         mLogger.error("mysql_stmt_execute() 失败 (设置余额): {}", mysql_stmt_error(stmt));
-        // 这里可以考虑检查具体的错误码，例如处理死锁 (ER_LOCK_DEADLOCK) 等情况
-        return false; // 执行失败
+        return false;
     }
+    // --- 数据库更新结束 ---
 
-    // 检查受影响的行数 (可选，但有助于调试和确认操作结果)
-    // INSERT 返回 1, UPDATE 返回 1 (如果值改变) 或 0 (如果值未变), INSERT...ON DUPLICATE KEY UPDATE:
-    // - 如果执行了 INSERT，返回 1
-    // - 如果执行了 UPDATE 且值改变，返回 2
-    // - 如果执行了 UPDATE 但值未变，返回 0 (MySQL 5.1.12 之前可能返回 1)
+    // --- 检查并记录流水 ---
     my_ulonglong affected_rows = mysql_stmt_affected_rows(stmt);
-    if (affected_rows == (my_ulonglong)-1) {
-         // 获取受影响行数时出错
-         mLogger.error("获取受影响行数时出错 (设置余额) UUID: {}, Currency: {}", uuid, currencyType);
-         // 即使这里出错，操作本身可能已经成功，所以不一定返回 false
-    } else if (affected_rows == 0) {
-         // 可能表示更新时值未改变
-         mLogger.debug("为 UUID: {}, Currency: {} 设置余额影响了 0 行 (可能金额未改变)。", uuid, currencyType);
-    } else if (affected_rows == 1) {
-        // 插入了一行新记录
-        mLogger.debug("为 UUID: {}, Currency: {} 插入新余额: {}", uuid, currencyType, formatBalance(amount));
-    } else if (affected_rows == 2) {
-        // 更新了现有记录
-        mLogger.debug("为 UUID: {}, Currency: {} 更新余额为: {}", uuid, currencyType, formatBalance(amount));
+    bool dbUpdateSucceeded = (affected_rows != (my_ulonglong)-1); // 只要执行没报错就算成功
+
+    if (dbUpdateSucceeded) {
+        int64_t changeAmount = amount - previousBalance; // 计算实际变动值
+        // 只有当金额实际发生变化时才记录日志 (affected_rows > 0 或插入新行时 affected_rows == 1)
+        // 或者即使金额未变 (affected_rows == 0)，也记录 set 操作？(当前选择：仅在值变化时记录)
+        if (changeAmount != 0) {
+             if (!logTransaction(uuid, currencyType, changeAmount, previousBalance, reason1, reason2, reason3)) {
+                 // 记录流水失败，这是一个严重问题，可能导致数据不一致
+                 mLogger.error("数据库余额已更新，但记录流水失败！UUID: {}, Currency: {}", uuid, currencyType);
+                 // 根据策略，这里可以尝试回滚，或者标记错误，或者返回 false
+                 // return false; // 如果要求流水必须成功
+             }
+        } else {
+             mLogger.debug("Set 操作未改变余额，不记录流水。UUID: {}, Currency: {}", uuid, currencyType);
+        }
+
+        // 记录调试信息 (基于 affected_rows)
+        if (affected_rows == 0) {
+            mLogger.debug("为 UUID: {}, Currency: {} 设置余额影响了 0 行 (金额未改变)。", uuid, currencyType);
+        } else if (affected_rows == 1) {
+            mLogger.debug("为 UUID: {}, Currency: {} 插入新余额: {}", uuid, currencyType, formatBalance(amount));
+        } else if (affected_rows == 2) {
+            mLogger.debug("为 UUID: {}, Currency: {} 更新余额为: {}", uuid, currencyType, formatBalance(amount));
+        } else if (affected_rows == (my_ulonglong)-1) {
+             mLogger.error("获取受影响行数时出错 (设置余额) UUID: {}, Currency: {}", uuid, currencyType);
+        } else {
+            mLogger.warn("为 UUID: {}, Currency: {} 设置余额影响了 {} 行。", uuid, currencyType, affected_rows);
+        }
     } else {
-        // 其他情况 (理论上不常见)
-        mLogger.warn("为 UUID: {}, Currency: {} 设置余额影响了 {} 行。", uuid, currencyType, affected_rows);
+         // 数据库更新本身失败了，不需要记录流水
+         mLogger.error("设置余额的数据库操作失败，不记录流水。UUID: {}, Currency: {}", uuid, currencyType);
+         return false; // 数据库操作失败，返回 false
     }
 
-    return true; // 操作成功 (即使 affected_rows 为 0 或 -1，执行本身未报错)
+    return true; // 数据库操作成功（即使流水记录可能失败，根据上面的策略）
 }
 
 
 // 增加玩家余额的实现 (更新)
-bool MoneyManager::addPlayerBalance(const std::string& uuid, const std::string& currencyType, int64_t amountToAdd) {
+bool MoneyManager::addPlayerBalance(
+    const std::string& uuid,
+    const std::string& currencyType,
+    int64_t            amountToAdd,
+    const std::string& reason1,
+    const std::string& reason2,
+    const std::string& reason3
+) {
     // 0. 检查货币类型是否已配置
     if (!isCurrencyConfigured(currencyType)) {
         mLogger.error("无法增加余额：货币类型 '{}' 未在配置中定义。", currencyType);
@@ -417,72 +687,108 @@ bool MoneyManager::addPlayerBalance(const std::string& uuid, const std::string& 
     // 检查增加的金额是否为正数
     if (amountToAdd <= 0) {
         mLogger.warn("尝试为 UUID: {}, Currency: {} 增加非正数金额 ({})", uuid, currencyType, formatBalance(amountToAdd));
-        // 增加 0 视为成功，但无实际操作
-        return amountToAdd == 0;
+        return amountToAdd == 0; // 增加 0 视为成功，但不记录流水
     }
 
-    // --- 事务处理 (推荐) ---
-    // 注意：以下事务控制代码被注释掉了，如果需要严格的原子性，应取消注释并进行测试。
-    // 简单的事务控制可以通过执行 SQL 语句实现。更复杂的场景可能需要事务管理类。
-    // bool transactionStarted = false;
-    // if (mDbConnection.query("START TRANSACTION") == 0) {
-    //     transactionStarted = true;
-    // } else {
-    //     mLogger.error("为增加余额启动事务失败: {}", mysql_error(mDbConnection.getMYSQL()));
-    //     return false; // 无法启动事务，操作失败
-    // }
+    // --- 事务处理 (可选，但推荐) ---
+    // bool transactionStarted = mDbConnection.query("START TRANSACTION") == 0;
+    // if (!transactionStarted) mLogger.error("启动事务失败 (增加余额)");
 
     try {
         // 1. 获取当前余额，如果不存在则初始化
         int64_t currentBalance = getPlayerBalanceOrInit(uuid, currencyType);
 
-        // 2. 检查加法是否会导致溢出
+        // 2. 检查溢出
         if (currentBalance > std::numeric_limits<int64_t>::max() - amountToAdd) {
-             mLogger.error("为 UUID: {}, Currency: {} 增加余额时检测到潜在溢出。当前: {}, 增加: {}",
-                           uuid, currencyType, formatBalance(currentBalance), formatBalance(amountToAdd));
+             mLogger.error("增加余额时检测到潜在溢出。UUID: {}, Currency: {}", uuid, currencyType);
              // if (transactionStarted) mDbConnection.query("ROLLBACK");
-             return false; // 操作失败
+             return false;
         }
-        int64_t newBalance = currentBalance + amountToAdd; // 计算新余额
+        int64_t newBalance = currentBalance + amountToAdd;
 
-        // 3. 设置新余额 (调用 setPlayerBalance 实现更新)
-        bool success = setPlayerBalance(uuid, currencyType, newBalance);
+        // 3. 设置新余额 (不再调用 setPlayerBalance 避免重复记录流水)
+        //    直接执行数据库更新操作
+        bool dbUpdateSuccess = false;
+        { // 创建一个作用域以确保 stmtGuard 正确释放
+            MYSQL* mysql = mDbConnection.getMYSQL();
+            MYSQL_STMT* stmt = mysql_stmt_init(mysql);
+            if (!stmt) {
+                mLogger.error("mysql_stmt_init() 失败 (增加余额更新): {}", mysql_error(mysql));
+                // if (transactionStarted) mDbConnection.query("ROLLBACK");
+                return false;
+            }
+            StatementGuard stmtGuard(stmt);
 
-        // --- 事务结束 ---
-        // if (transactionStarted) {
-        //     if (success) {
-        //         // 操作成功，提交事务
-        //         if (mDbConnection.query("COMMIT") != 0) {
-        //             mLogger.error("为增加余额提交事务失败: {}", mysql_error(mDbConnection.getMYSQL()));
-        //             // 提交失败可能导致数据不一致，需要特别注意！
-        //             // 此时 setPlayerBalance 可能已成功，但事务未提交。
-        //             return false; // 如果提交失败，也视为操作失败
-        //         }
-        //     } else {
-        //         // 操作失败 (setPlayerBalance 返回 false)，回滚事务
-        //         if (mDbConnection.query("ROLLBACK") != 0) {
-        //             // 回滚失败也需要记录错误
-        //             mLogger.error("为增加余额回滚事务失败: {}", mysql_error(mDbConnection.getMYSQL()));
-        //         }
-        //         // success 已经是 false
-        //     }
-        // }
+            const std::string sql = R"(
+                INSERT INTO player_balances (uuid, currency_type, amount)
+                VALUES (?, ?, ?)
+                ON DUPLICATE KEY UPDATE amount = VALUES(amount);
+            )";
 
-        if (success) {
-             mLogger.debug("成功为 UUID: {}, Currency: {} 增加余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToAdd), formatBalance(newBalance));
+            if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.length()))) {
+                mLogger.error("mysql_stmt_prepare() 失败 (增加余额更新): {}", mysql_stmt_error(stmt));
+                // if (transactionStarted) mDbConnection.query("ROLLBACK");
+                return false;
+            }
+
+            MYSQL_BIND params[3];
+            memset(params, 0, sizeof(params));
+            unsigned long uuidLen = static_cast<unsigned long>(uuid.length());
+            params[0].buffer_type = MYSQL_TYPE_STRING; params[0].buffer = const_cast<char*>(uuid.c_str()); params[0].buffer_length = uuidLen; params[0].length = &uuidLen;
+            unsigned long currencyTypeLen = static_cast<unsigned long>(currencyType.length());
+            params[1].buffer_type = MYSQL_TYPE_STRING; params[1].buffer = const_cast<char*>(currencyType.c_str()); params[1].buffer_length = currencyTypeLen; params[1].length = &currencyTypeLen;
+            params[2].buffer_type = MYSQL_TYPE_LONGLONG; params[2].buffer = &newBalance; params[2].is_unsigned = false;
+
+            if (mysql_stmt_bind_param(stmt, params)) {
+                mLogger.error("mysql_stmt_bind_param() 失败 (增加余额更新): {}", mysql_stmt_error(stmt));
+                // if (transactionStarted) mDbConnection.query("ROLLBACK");
+                return false;
+            }
+
+            if (mysql_stmt_execute(stmt)) {
+                mLogger.error("mysql_stmt_execute() 失败 (增加余额更新): {}", mysql_stmt_error(stmt));
+                // if (transactionStarted) mDbConnection.query("ROLLBACK");
+                return false;
+            }
+            dbUpdateSuccess = (mysql_stmt_affected_rows(stmt) != (my_ulonglong)-1);
+        } // stmtGuard 在此作用域结束时释放 stmt
+
+        // 4. 如果数据库更新成功，记录流水
+        if (dbUpdateSuccess) {
+            if (!logTransaction(uuid, currencyType, amountToAdd, currentBalance, reason1, reason2, reason3)) {
+                mLogger.error("数据库余额已更新，但记录流水失败！(增加余额) UUID: {}, Currency: {}", uuid, currencyType);
+                // 根据策略决定是否回滚或返回失败
+                // if (transactionStarted) mDbConnection.query("ROLLBACK");
+                // return false;
+            }
+            mLogger.debug("成功为 UUID: {}, Currency: {} 增加余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToAdd), formatBalance(newBalance));
+            // if (transactionStarted && mDbConnection.query("COMMIT") != 0) {
+            //     mLogger.error("提交事务失败 (增加余额)");
+            //     return false; // 提交失败也算失败
+            // }
+            return true; // 数据库更新和流水记录（或尝试记录）都完成
+        } else {
+            // 数据库更新失败
+            // if (transactionStarted) mDbConnection.query("ROLLBACK");
+            return false;
         }
-        return success;
 
     } catch (const std::runtime_error& e) {
-        // 捕获 getPlayerBalanceOrInit 可能抛出的异常 (例如初始化失败)
         mLogger.error("增加余额失败 (获取或初始化时出错): {}", e.what());
         // if (transactionStarted) mDbConnection.query("ROLLBACK");
         return false;
     }
 }
 
-// 减少玩家余额的实现 (保持不变，不初始化)
-bool MoneyManager::subtractPlayerBalance(const std::string& uuid, const std::string& currencyType, int64_t amountToSubtract) {
+// 减少玩家余额的实现 (更新)
+bool MoneyManager::subtractPlayerBalance(
+    const std::string& uuid,
+    const std::string& currencyType,
+    int64_t            amountToSubtract,
+    const std::string& reason1,
+    const std::string& reason2,
+    const std::string& reason3
+) {
     // 0. 检查货币类型是否已配置
     if (!isCurrencyConfigured(currencyType)) {
         mLogger.error("无法减少余额：货币类型 '{}' 未在配置中定义。", currencyType);
@@ -492,76 +798,130 @@ bool MoneyManager::subtractPlayerBalance(const std::string& uuid, const std::str
     // 检查减少的金额是否为正数
     if (amountToSubtract <= 0) {
         mLogger.warn("尝试为 UUID: {}, Currency: {} 减少非正数金额 ({})", uuid, currencyType, formatBalance(amountToSubtract));
-        // 减少 0 视为成功
-        return amountToSubtract == 0;
+        return amountToSubtract == 0; // 减少 0 视为成功，不记录流水
     }
 
-    // --- 事务处理 (推荐使用) ---
-    // bool transactionStarted = false;
-    // if (mDbConnection.query("START TRANSACTION") == 0) {
-    //     transactionStarted = true;
-    // } else {
-    //     mLogger.error("为减少余额启动事务失败: {}", mysql_error(mDbConnection.getMYSQL()));
-    //     return false;
-    // }
+    // --- 事务处理 (可选，但推荐) ---
+    // bool transactionStarted = mDbConnection.query("START TRANSACTION") == 0;
+    // if (!transactionStarted) mLogger.error("启动事务失败 (减少余额)");
 
-    // 1. 获取当前余额 (不使用 OrInit，因为扣款前必须有账户)
+    // 1. 获取当前余额 (不初始化)
     std::optional<int64_t> currentBalanceOpt = getPlayerBalance(uuid, currencyType);
 
-    // 检查账户是否存在
     if (!currentBalanceOpt.has_value()) {
         mLogger.warn("尝试从不存在的账户扣款。UUID: {}, Currency: {}", uuid, currencyType);
         // if (transactionStarted) mDbConnection.query("ROLLBACK");
-        return false; // 账户不存在，无法扣款
+        return false;
     }
-
     int64_t currentBalance = currentBalanceOpt.value();
 
-    // 检查余额是否足够
+    // 2. 检查余额是否足够 (原始检查)
     if (currentBalance < amountToSubtract) {
         mLogger.warn("余额不足无法扣款。UUID: {}, Currency: {}, 当前: {}, 请求: {}",
                      uuid, currencyType, formatBalance(currentBalance), formatBalance(amountToSubtract));
         // if (transactionStarted) mDbConnection.query("ROLLBACK");
-        return false; // 余额不足
+        return false;
     }
 
-    // 检查减法是否会导致下溢 (int64_t 最小值)
-    // 如果 currentBalance 接近 int64_min，减去一个正数可能导致下溢
+    // 3. 检查下溢
      if (currentBalance < std::numeric_limits<int64_t>::min() + amountToSubtract) {
-         mLogger.error("为 UUID: {}, Currency: {} 减少余额时检测到潜在下溢。当前: {}, 减少: {}",
-                       uuid, currencyType, formatBalance(currentBalance), formatBalance(amountToSubtract));
+         mLogger.error("减少余额时检测到潜在下溢。UUID: {}, Currency: {}", uuid, currencyType);
          // if (transactionStarted) mDbConnection.query("ROLLBACK");
-         return false; // 操作失败
+         return false;
      }
-
-    // 2. 计算新余额
     int64_t newBalance = currentBalance - amountToSubtract;
 
-    // 3. 设置新余额
-    bool success = setPlayerBalance(uuid, currencyType, newBalance);
-
-    // --- 事务结束 ---
-    // if (transactionStarted) {
-    //     if (success) {
-    //         // 提交事务
-    //         if (mDbConnection.query("COMMIT") != 0) {
-    //             mLogger.error("为减少余额提交事务失败: {}", mysql_error(mDbConnection.getMYSQL()));
-    //             return false; // 提交失败视为操作失败
-    //         }
-    //     } else {
-    //         // 回滚事务
-    //         if (mDbConnection.query("ROLLBACK") != 0) {
-    //             mLogger.error("为减少余额回滚事务失败: {}", mysql_error(mDbConnection.getMYSQL()));
-    //         }
-    //     }
-    // }
-
-    // 记录调试信息
-    if (success) {
-         mLogger.debug("成功为 UUID: {}, Currency: {} 减少余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToSubtract), formatBalance(newBalance));
+    // 新增：检查扣款后是否低于最低余额
+    int64_t minBalance = getMinimumBalance(currencyType);
+    if (newBalance < minBalance) {
+        mLogger.error(
+            "无法减少余额：操作将使 UUID: {} 的 Currency: {} 余额 ({}) 低于最低允许值 ({})",
+            uuid,
+            currencyType,
+            formatBalance(newBalance),
+            formatBalance(minBalance)
+        );
+        // if (transactionStarted) mDbConnection.query("ROLLBACK");
+        return false;
     }
 
-    return success; // 返回 setPlayerBalance 的结果
+
+    // 4. 设置新余额 (直接执行数据库更新)
+    bool dbUpdateSuccess = false;
+    {
+        MYSQL* mysql = mDbConnection.getMYSQL();
+        MYSQL_STMT* stmt = mysql_stmt_init(mysql);
+        if (!stmt) {
+            mLogger.error("mysql_stmt_init() 失败 (减少余额更新): {}", mysql_error(mysql));
+            // if (transactionStarted) mDbConnection.query("ROLLBACK");
+            return false;
+        }
+        StatementGuard stmtGuard(stmt);
+
+        // 这里使用 UPDATE 而不是 INSERT...ON DUPLICATE KEY UPDATE，因为我们已经确认账户存在
+        const std::string sql = "UPDATE player_balances SET amount = ? WHERE uuid = ? AND currency_type = ?";
+
+        if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.length()))) {
+            mLogger.error("mysql_stmt_prepare() 失败 (减少余额更新): {}", mysql_stmt_error(stmt));
+            // if (transactionStarted) mDbConnection.query("ROLLBACK");
+            return false;
+        }
+
+        MYSQL_BIND params[3];
+        memset(params, 0, sizeof(params));
+        params[0].buffer_type = MYSQL_TYPE_LONGLONG; params[0].buffer = &newBalance; params[0].is_unsigned = false;
+        unsigned long uuidLen = static_cast<unsigned long>(uuid.length());
+        params[1].buffer_type = MYSQL_TYPE_STRING; params[1].buffer = const_cast<char*>(uuid.c_str()); params[1].buffer_length = uuidLen; params[1].length = &uuidLen;
+        unsigned long currencyTypeLen = static_cast<unsigned long>(currencyType.length());
+        params[2].buffer_type = MYSQL_TYPE_STRING; params[2].buffer = const_cast<char*>(currencyType.c_str()); params[2].buffer_length = currencyTypeLen; params[2].length = &currencyTypeLen;
+
+
+        if (mysql_stmt_bind_param(stmt, params)) {
+            mLogger.error("mysql_stmt_bind_param() 失败 (减少余额更新): {}", mysql_stmt_error(stmt));
+            // if (transactionStarted) mDbConnection.query("ROLLBACK");
+            return false;
+        }
+
+        if (mysql_stmt_execute(stmt)) {
+            mLogger.error("mysql_stmt_execute() 失败 (减少余额更新): {}", mysql_stmt_error(stmt));
+            // if (transactionStarted) mDbConnection.query("ROLLBACK");
+            return false;
+        }
+        // 检查 UPDATE 是否成功影响了 1 行
+        my_ulonglong affected_rows = mysql_stmt_affected_rows(stmt);
+        if (affected_rows == 1) {
+            dbUpdateSuccess = true;
+        } else if (affected_rows == 0) {
+            // 可能并发修改导致条件不满足，或者值未变？
+            mLogger.warn("减少余额的 UPDATE 操作影响了 0 行。UUID: {}, Currency: {}", uuid, currencyType);
+            // 视为失败，因为我们期望更新一行
+            dbUpdateSuccess = false;
+        } else {
+            mLogger.error("减少余额的 UPDATE 操作影响了 {} 行 (预期 1)。UUID: {}, Currency: {}", affected_rows, uuid, currencyType);
+            dbUpdateSuccess = false; // 异常情况，视为失败
+        }
+    } // stmtGuard 释放 stmt
+
+    // 5. 如果数据库更新成功，记录流水
+    if (dbUpdateSuccess) {
+        // 注意：changeAmount 是负数
+        if (!logTransaction(uuid, currencyType, -amountToSubtract, currentBalance, reason1, reason2, reason3)) {
+            mLogger.error("数据库余额已更新，但记录流水失败！(减少余额) UUID: {}, Currency: {}", uuid, currencyType);
+            // 根据策略决定是否回滚或返回失败
+            // if (transactionStarted) mDbConnection.query("ROLLBACK");
+            // return false;
+        }
+         mLogger.debug("成功为 UUID: {}, Currency: {} 减少余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToSubtract), formatBalance(newBalance));
+        // if (transactionStarted && mDbConnection.query("COMMIT") != 0) {
+        //     mLogger.error("提交事务失败 (减少余额)");
+        //     return false;
+        // }
+        return true;
+    } else {
+        // 数据库更新失败
+        // if (transactionStarted) mDbConnection.query("ROLLBACK");
+        return false;
+    }
 }
 
 

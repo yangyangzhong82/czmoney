@@ -251,12 +251,14 @@ void registerMoneyCommands() {
                          continue;
                     }
                     std::string uuidStr = player->getUuid().asString();
-                    if (moneyManager.setPlayerBalance(uuidStr, currency, amountInCents)) { // Use amountInCents
+                    // 添加理由
+                    std::string reason1 = "Command: cmoney set";
+                    if (moneyManager.setPlayerBalance(uuidStr, currency, amountInCents, reason1)) { // Use amountInCents and reason
                         successCount++;
                     } else {
                         failCount++;
-                         // 失败原因可能在 MoneyManager 或 API 层记录，这里只报告通用失败
-                         output.error(fmt::format("Failed to set balance for {}.", player->getRealName()));
+                         // 失败原因可能在 MoneyManager 记录，提示用户检查日志或可能的原因
+                         output.error(fmt::format("Failed to set balance for {}. Amount might be below minimum allowed. Check logs.", player->getRealName()));
                     }
                 }
                  sendFeedback(output, fmt::format("Set balance for {} players, {} failed.", successCount, failCount), successCount > 0);
@@ -297,11 +299,13 @@ void registerMoneyCommands() {
                 const auto& playerInfo = playerInfoOpt.value();
                 std::string uuidStr = playerInfo.uuid.asString();
 
-                // Set balance
-                if (moneyManager.setPlayerBalance(uuidStr, currency, amountInCents)) {
-                    sendFeedback(output, fmt::format("Set {}'s balance ({}) to {}.", playerInfo.name, currency, MoneyManager::formatBalance(amountInCents)), true);
+                // Set balance with reason
+                std::string reason1 = "Command: cmoney set";
+                if (moneyManager.setPlayerBalance(uuidStr, currency, amountInCents, reason1)) {
+                    sendFeedback(output, fmt::format("Set {}'s balance ({}) to {}.", playerInfo.name, currency, MoneyManager::formatBalance(amountInCents)), true); // Corrected: Use :: for static method
                 } else {
-                    sendFeedback(output, fmt::format("Failed to set balance for {}.", playerInfo.name), false);
+                    // 提示可能的原因
+                    sendFeedback(output, fmt::format("Failed to set balance for {}. Amount might be below minimum allowed. Check logs.", playerInfo.name), false);
                 }
             }
         );
@@ -346,12 +350,14 @@ void registerMoneyCommands() {
                          continue;
                     }
                     std::string uuidStr = player->getUuid().asString();
-                    if (moneyManager.addPlayerBalance(uuidStr, currency, amountToAddInCents)) { // Use amountToAddInCents
+                    // 添加理由
+                    std::string reason1 = "Command: cmoney add";
+                    if (moneyManager.addPlayerBalance(uuidStr, currency, amountToAddInCents, reason1)) { // Use amountToAddInCents and reason
                         successCount++;
                     } else {
                         failCount++;
-                        // 增加失败通常是溢出
-                        output.error(fmt::format("Failed to add balance for {} (maybe overflow?).", player->getRealName()));
+                        // 增加失败通常是溢出或数据库错误
+                        output.error(fmt::format("Failed to add balance for {} (maybe overflow?). Check logs.", player->getRealName()));
                     }
                 }
                 sendFeedback(output, fmt::format("Added balance for {} players, {} failed.", successCount, failCount), successCount > 0);
@@ -392,13 +398,15 @@ void registerMoneyCommands() {
                 const auto& playerInfo = playerInfoOpt.value();
                 std::string uuidStr = playerInfo.uuid.asString();
 
-                // Add balance
-                if (moneyManager.addPlayerBalance(uuidStr, currency, amountToAddInCents)) {
+                // Add balance with reason
+                std::string reason1 = "Command: cmoney add";
+                if (moneyManager.addPlayerBalance(uuidStr, currency, amountToAddInCents, reason1)) {
                     // Get the new balance to display it
                     int64_t newBalance = moneyManager.getPlayerBalanceOrInit(uuidStr, currency); // Re-fetch or assume success
-                    sendFeedback(output, fmt::format("Added {} to {}'s balance ({}). New balance: {}", MoneyManager::formatBalance(amountToAddInCents), playerInfo.name, currency, MoneyManager::formatBalance(newBalance)), true);
+                    sendFeedback(output, fmt::format("Added {} to {}'s balance ({}). New balance: {}", MoneyManager::formatBalance(amountToAddInCents), playerInfo.name, currency, MoneyManager::formatBalance(newBalance)), true); // Corrected: Use :: for static method
                 } else {
-                    sendFeedback(output, fmt::format("Failed to add balance for {} (maybe overflow?).", playerInfo.name), false);
+                    // 增加失败通常是溢出或数据库错误
+                    sendFeedback(output, fmt::format("Failed to add balance for {} (maybe overflow?). Check logs.", playerInfo.name), false);
                 }
             }
         );
@@ -443,8 +451,10 @@ void registerMoneyCommands() {
                         continue;
                     }
                     std::string uuidStr = player->getUuid().asString();
+                    // 添加理由
+                    std::string reason1 = "Command: cmoney reduce";
                     // 注意：subtractPlayerBalance 不会自动初始化账户
-                    if (moneyManager.subtractPlayerBalance(uuidStr, currency, amountToReduceInCents)) { // Use amountToReduceInCents
+                    if (moneyManager.subtractPlayerBalance(uuidStr, currency, amountToReduceInCents, reason1)) { // Use amountToReduceInCents and reason
                         successCount++;
                     } else {
                         failCount++;
@@ -453,10 +463,11 @@ void registerMoneyCommands() {
                         if (!currentBalanceOpt.has_value()) {
                              output.error(fmt::format("Failed to reduce balance for {}: Account does not exist.", player->getRealName()));
                         } else if (currentBalanceOpt.value() < amountToReduceInCents) { // Compare with cents
-                              output.error(fmt::format("Failed to reduce balance for {}: Insufficient funds (has {}).", player->getRealName(), MoneyManager::formatBalance(currentBalanceOpt.value())));
+                              // 提示余额不足或可能低于最低值
+                              output.error(fmt::format("Failed to reduce balance for {}: Insufficient funds (has {}) or result below minimum allowed. Check logs.", player->getRealName(), MoneyManager::formatBalance(currentBalanceOpt.value())));
                          } else {
-                             // 可能是数据库错误或其他内部问题
-                             output.error(fmt::format("Failed to reduce balance for {} (check logs for details).", player->getRealName()));
+                             // 可能是数据库错误、低于最低值或其他内部问题
+                             output.error(fmt::format("Failed to reduce balance for {}. Result might be below minimum allowed. Check logs.", player->getRealName()));
                          }
                      }
                  }
@@ -511,13 +522,14 @@ void registerMoneyCommands() {
                     return;
                 }
 
-                // 尝试扣款
-                if (moneyManager.subtractPlayerBalance(uuidStr, currency, amountToReduceInCents)) {
+                // 尝试扣款 with reason
+                std::string reason1 = "Command: cmoney reduce";
+                if (moneyManager.subtractPlayerBalance(uuidStr, currency, amountToReduceInCents, reason1)) {
                     int64_t newBalance = currentBalanceOpt.value() - amountToReduceInCents; // 直接计算新余额
-                    sendFeedback(output, fmt::format("Reduced {} from {}'s balance ({}). New balance: {}", MoneyManager::formatBalance(amountToReduceInCents), playerInfo.name, currency, MoneyManager::formatBalance(newBalance)), true);
+                    sendFeedback(output, fmt::format("Reduced {} from {}'s balance ({}). New balance: {}", MoneyManager::formatBalance(amountToReduceInCents), playerInfo.name, currency, MoneyManager::formatBalance(newBalance)), true); // Corrected: Use :: for static method
                 } else {
-                    // 如果之前的检查都通过了，这里的失败可能是数据库错误等
-                    sendFeedback(output, fmt::format("Failed to reduce balance for {} (check logs for details).", playerInfo.name), false);
+                    // 如果之前的检查都通过了，这里的失败可能是数据库错误或低于最低值
+                    sendFeedback(output, fmt::format("Failed to reduce balance for {}. Result might be below minimum allowed. Check logs.", playerInfo.name), false);
                 }
             }
         );

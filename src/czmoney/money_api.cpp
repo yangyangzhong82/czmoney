@@ -13,12 +13,9 @@ inline czmoney::MoneyManager* getMoneyManagerInstance() {
     try {
         return &czmoney::MyMod::getInstance().getMoneyManager();
     } catch (const std::exception& e) {
-        // 如果 getMoneyManager() 抛出异常 (例如插件未启用)
-        // 使用 MyMod 的 logger 记录错误，因为 API 函数可能在没有特定 logger 上下文的情况下被调用
         try {
              czmoney::MyMod::getInstance().getSelf().getLogger().error("无法获取 MoneyManager 实例 (插件是否已启用?): {}", e.what());
         } catch (...) {
-             // 如果连获取 logger 都失败，则无法记录
         }
         return nullptr; // 返回空指针表示失败
     }
@@ -104,7 +101,14 @@ int64_t getPlayerBalanceOrInit(std::string_view uuid, std::string_view currencyT
 }
 
 // 修改 setPlayerBalance 实现
-bool setPlayerBalance(std::string_view uuid, std::string_view currencyType, double amount) {
+bool setPlayerBalance(
+    std::string_view uuid,
+    std::string_view currencyType,
+    double           amount,
+    std::string_view reason1,
+    std::string_view reason2,
+    std::string_view reason3
+) {
     // 转换并验证金额
     std::optional<int64_t> amountInCentsOpt = convertDoubleToInt64(amount, false); // false: 允许负数
     if (!amountInCentsOpt) {
@@ -114,13 +118,27 @@ bool setPlayerBalance(std::string_view uuid, std::string_view currencyType, doub
 
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
-        return manager->setPlayerBalance(std::string(uuid), std::string(currencyType), amountInCents);
+        return manager->setPlayerBalance(
+            std::string(uuid),
+            std::string(currencyType),
+            amountInCents,
+            std::string(reason1), // 传递理由
+            std::string(reason2),
+            std::string(reason3)
+        );
     }
     return false; // 获取 manager 失败
 }
 
 // 修改 addPlayerBalance 实现
-bool addPlayerBalance(std::string_view uuid, std::string_view currencyType, double amountToAdd) {
+bool addPlayerBalance(
+    std::string_view uuid,
+    std::string_view currencyType,
+    double           amountToAdd,
+    std::string_view reason1,
+    std::string_view reason2,
+    std::string_view reason3
+) {
     // 转换并验证金额，要求为正数
     std::optional<int64_t> amountToAddInCentsOpt = convertDoubleToInt64(amountToAdd, true); // true: 要求正数
     if (!amountToAddInCentsOpt) {
@@ -129,17 +147,30 @@ bool addPlayerBalance(std::string_view uuid, std::string_view currencyType, doub
     int64_t amountToAddInCents = amountToAddInCentsOpt.value();
 
     // API 层不再检查 <= 0，交给 convertDoubleToInt64
-    // if (amountToAdd <= 0) return false; // API 强制要求增加正数金额 (已移至转换函数)
 
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
-        return manager->addPlayerBalance(std::string(uuid), std::string(currencyType), amountToAddInCents);
+        return manager->addPlayerBalance(
+            std::string(uuid),
+            std::string(currencyType),
+            amountToAddInCents,
+            std::string(reason1), // 传递理由
+            std::string(reason2),
+            std::string(reason3)
+        );
     }
     return false; // 获取 manager 失败
 }
 
 // 修改 subtractPlayerBalance 实现
-bool subtractPlayerBalance(std::string_view uuid, std::string_view currencyType, double amountToSubtract) {
+bool subtractPlayerBalance(
+    std::string_view uuid,
+    std::string_view currencyType,
+    double           amountToSubtract,
+    std::string_view reason1,
+    std::string_view reason2,
+    std::string_view reason3
+) {
     // 转换并验证金额，要求为正数
     std::optional<int64_t> amountToSubtractInCentsOpt = convertDoubleToInt64(amountToSubtract, true); // true: 要求正数
      if (!amountToSubtractInCentsOpt) {
@@ -148,11 +179,17 @@ bool subtractPlayerBalance(std::string_view uuid, std::string_view currencyType,
     int64_t amountToSubtractInCents = amountToSubtractInCentsOpt.value();
 
     // API 层不再检查 <= 0，交给 convertDoubleToInt64
-    // if (amountToSubtract <= 0) return false; // API 强制要求减少正数金额 (已移至转换函数)
 
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
-        return manager->subtractPlayerBalance(std::string(uuid), std::string(currencyType), amountToSubtractInCents);
+        return manager->subtractPlayerBalance(
+            std::string(uuid),
+            std::string(currencyType),
+            amountToSubtractInCents,
+            std::string(reason1), // 传递理由
+            std::string(reason2),
+            std::string(reason3)
+        );
     }
     return false; // 获取 manager 失败
 }

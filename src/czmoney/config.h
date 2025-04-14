@@ -8,8 +8,10 @@ namespace czmoney {
 
 // 结构体：包含特定货币类型的设置
 struct CurrencyConfig {
-    // 初始余额 (整数，实际金额 * 100)
-    int64_t initialBalance = 0;
+    // 初始余额 (浮点数，例如 100.00)
+    double initialBalance = 0.0;
+    // 最低余额 (浮点数，例如 0.00 或 -10.00)，默认为 0.0
+    double minimumBalance = 0.0;
 
     // 未来可以添加更多设置，例如：
     // bool enabled = true;
@@ -32,10 +34,10 @@ struct Config {
     // 键: 货币类型 (例如 "money", "points")
     // 值: 该货币类型的具体配置 (CurrencyConfig)
     std::unordered_map<std::string, CurrencyConfig> economy = {
-        {"money", {10000}}, // 示例：money 的初始值为 100.00
-        {"points", {0}}     // 示例：points 的初始值为 0
+        {"money", {100.00, 0.00}}, // 示例：money 的初始值为 100.00, 最低为 0.00
+        {"points", {0.0, 0.0}}     // 示例：points 的初始值为 0.0, 最低为 0.0
         // 可以添加更多货币类型及其配置
-        // {"gems", {5, true, 0.01, "Gems"}} // 假设 CurrencyConfig 有更多字段
+        // {"gems", {5.00, -10.00}} // 假设 gems 初始 5.00, 最低 -10.00
     };
 
     // 未来可以添加其他全局配置

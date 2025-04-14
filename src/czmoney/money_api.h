@@ -53,9 +53,19 @@ CZMONEY_API int64_t getPlayerBalanceOrInit(std::string_view uuid, std::string_vi
  * @param uuid 玩家的 UUID
  * @param currencyType 货币类型
  * @param amount 要设置的余额 (浮点数，例如 123.45)
- * @return bool 操作是否成功 (包括金额有效性检查)
+ * @param reason1 可选的操作理由 1 (例如，插件名称)
+ * @param reason2 可选的操作理由 2
+ * @param reason3 可选的操作理由 3
+ * @return bool 操作是否成功 (包括金额有效性检查以及是否低于配置的最低余额)
  */
-CZMONEY_API bool setPlayerBalance(std::string_view uuid, std::string_view currencyType, double amount);
+CZMONEY_API bool setPlayerBalance(
+    std::string_view uuid,
+    std::string_view currencyType,
+    double           amount,
+    std::string_view reason1 = "",
+    std::string_view reason2 = "",
+    std::string_view reason3 = ""
+);
 
 /**
  * @brief 增加玩家指定货币类型的余额
@@ -64,9 +74,19 @@ CZMONEY_API bool setPlayerBalance(std::string_view uuid, std::string_view curren
  * @param uuid 玩家的 UUID
  * @param currencyType 货币类型
  * @param amountToAdd 要增加的金额 (必须为正的浮点数，例如 10.50)
+ * @param reason1 可选的操作理由 1
+ * @param reason2 可选的操作理由 2
+ * @param reason3 可选的操作理由 3
  * @return bool 操作是否成功 (包括金额有效性检查)
  */
-CZMONEY_API bool addPlayerBalance(std::string_view uuid, std::string_view currencyType, double amountToAdd);
+CZMONEY_API bool addPlayerBalance(
+    std::string_view uuid,
+    std::string_view currencyType,
+    double           amountToAdd,
+    std::string_view reason1 = "",
+    std::string_view reason2 = "",
+    std::string_view reason3 = ""
+);
 
 /**
  * @brief 减少玩家指定货币类型的余额
@@ -75,9 +95,19 @@ CZMONEY_API bool addPlayerBalance(std::string_view uuid, std::string_view curren
  * @param uuid 玩家的 UUID
  * @param currencyType 货币类型
  * @param amountToSubtract 要减少的金额 (必须为正的浮点数，例如 5.25)
- * @return bool 如果操作成功（账户存在且余额足够）则返回 true，否则返回 false (包括金额有效性检查)
+ * @param reason1 可选的操作理由 1
+ * @param reason2 可选的操作理由 2
+ * @param reason3 可选的操作理由 3
+ * @return bool 如果操作成功（账户存在、余额足够且操作后不低于配置的最低余额）则返回 true，否则返回 false (包括金额有效性检查)
  */
-CZMONEY_API bool subtractPlayerBalance(std::string_view uuid, std::string_view currencyType, double amountToSubtract);
+CZMONEY_API bool subtractPlayerBalance(
+    std::string_view uuid,
+    std::string_view currencyType,
+    double           amountToSubtract,
+    std::string_view reason1 = "",
+    std::string_view reason2 = "",
+    std::string_view reason3 = ""
+);
 
 /**
  * @brief 检查玩家账户是否存在
