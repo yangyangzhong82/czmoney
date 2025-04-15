@@ -1,7 +1,9 @@
 #pragma once
 
 #include "ll/api/mod/NativeMod.h"
-#include "czmoney/mysql.h" // 包含 MySQL 连接头文件
+#include "czmoney/database_interface.h" // 包含数据库接口
+#include "czmoney/mysql.h" // 仍然需要包含，因为 enable 中可能创建 MySQLConnection
+#include "czmoney/sqlite.h" // 包含 SQLite 连接头文件
 #include "czmoney/config.h"
 #include "czmoney/money.h" // 包含 MoneyManager 头文件
 #include <memory>      // 为了 std::unique_ptr
@@ -41,7 +43,7 @@ public:
 
 private:
     ll::mod::NativeMod& mSelf;
-    std::unique_ptr<db::MySQLConnection> mDbConnection; // 数据库连接指针
+    std::unique_ptr<db::IDatabaseConnection> mDbConnection; // 使用接口类型的 unique_ptr
     std::unique_ptr<MoneyManager> mMoneyManager; // 经济管理器指针
     Config mConfig; // 存储加载的配置
     std::filesystem::path mConfigPath; // 配置文件路径

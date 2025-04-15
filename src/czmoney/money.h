@@ -6,11 +6,11 @@
 #include <vector>      // 用于返回流水列表
 #include "ll/api/io/Logger.h" // 引入 LeviLamina 的日志记录器
 #include "czmoney/config.h" // 包含配置文件头文件
+#include "czmoney/database_interface.h" // 包含数据库接口
 
 // 前向声明 (Forward declaration)
-// 这样可以避免在头文件中包含 mysql.h，减少编译依赖
 namespace db {
-class MySQLConnection;
+class IDatabaseConnection; // 前向声明接口
 }
 
 namespace czmoney {
@@ -33,10 +33,10 @@ class MoneyManager {
 public:
     /**
      * @brief 构造函数
-     * @param dbConn 一个有效的数据库连接对象的引用
+     * @param dbConn 一个有效的数据库连接对象 (实现了 IDatabaseConnection 接口) 的引用
      * @param config 配置对象的引用，用于获取初始余额等设置
      */
-    explicit MoneyManager(db::MySQLConnection& dbConn, const Config& config); // 修改构造函数签名
+    explicit MoneyManager(db::IDatabaseConnection& dbConn, const Config& config); // 使用接口
 
     // 禁用拷贝构造函数和拷贝赋值运算符，防止意外复制
     MoneyManager(const MoneyManager&) = delete;
@@ -205,8 +205,8 @@ private:
      */
     std::optional<int64_t> convertDoubleToInt64(double amount, const std::string& context) const;
 
-    db::MySQLConnection& mDbConnection; // 持有数据库连接的引用
-    const Config& mConfig;             // 持有配置对象的引用 (新增)
+    db::IDatabaseConnection& mDbConnection; // 持有数据库连接接口的引用
+    const Config& mConfig;             // 持有配置对象的引用
     ll::io::Logger& mLogger;           // 持有日志记录器的引用
 
     /**

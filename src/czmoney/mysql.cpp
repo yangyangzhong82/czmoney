@@ -1,5 +1,7 @@
 #include "czmoney/mysql.h"
 #include <utility> // For std::move
+#include <vector>  // For DbResult, DbRow
+#include <variant> // For DbValue
 
 namespace db {
 
@@ -117,25 +119,91 @@ bool MySQLConnection::isConnected() const {
     return m_connected && m_connection;
 }
 
-// 执行 SQL 查询实现 (简单版本)
-int MySQLConnection::query(const std::string& sql) {
+// 执行 SQL 语句实现 (符合 IDatabaseConnection 接口)
+int MySQLConnection::execute(const std::string& sql) {
     if (!isConnected()) {
-        // throw MySQLException("Not connected to database"); // 示例：抛出异常
-        return -1; // 或者返回错误码
+        throw MySQLException("Not connected to database"); // 抛出异常
+        // return -1; // 或者返回错误码
     }
 
     if (mysql_query(m_connection, sql.c_str())) {
         // 查询执行失败
-        throw MySQLException("mysql_query failed", m_connection); // 抛出异常
-        return mysql_errno(m_connection); // 返回 MySQL 错误码
+        throw MySQLException("mysql_query failed for SQL: " + sql, m_connection); // 抛出异常
+        // return mysql_errno(m_connection); // 返回 MySQL 错误码
     }
 
-    return 0; // 查询成功
+    // 对于 INSERT, UPDATE, DELETE 等操作，可以返回影响的行数
+    // 对于 CREATE, DROP 等 DDL 操作，通常返回 0
+    // 这里简单返回 0 表示成功，与接口定义一致
+    return 0; // 操作成功 (注意：这不一定是影响的行数)
 }
 
 // 获取底层 MYSQL 指针实现
 MYSQL* MySQLConnection::getMYSQL() const {
     return m_connection;
 }
+
+
+// 实现 query 方法
+DbResult MySQLConnection::query(const std::string& sql) {
+    if (!isConnected()) {
+        throw MySQLException("Not connected to MySQL database");
+    }
+
+    // 使用 mysql_real_query 防止 SQL 注入 (虽然这里 sql 是直接传入的)
+    if (mysql_real_query(m_connection, sql.c_str(), static_cast<unsigned long>(sql.length())) != 0) {
+        throw MySQLException("mysql_real_query failed", m_connection);
+    }
+
+    // 存储查询结果
+    MYSQL_RES* result = mysql_store_result(m_connection);
+    if (!result) {
+        // 检查是查询没有返回结果集 (例如 INSERT, UPDATE) 还是发生了错误
+        if (mysql_field_count(m_connection) == 0) {
+            // 没有结果集 (例如 INSERT, UPDATE)，返回空 DbResult
+            return {};
+        } else {
+            // 发生了错误
+            throw MySQLException("mysql_store_result failed", m_connection);
+        }
+    }
+
+    // 使用 RAII 管理 MYSQL_RES
+    std::unique_ptr<MYSQL_RES, decltype(&mysql_free_result)> resultGuard(result, mysql_free_result);
+
+    DbResult dbResult; // 最终返回的结果集
+    MYSQL_ROW row;
+    unsigned int numFields = mysql_num_fields(result);
+
+    // 逐行获取数据
+    while ((row = mysql_fetch_row(result))) {
+        DbRow dbRow;
+        dbRow.reserve(numFields); // 预分配空间
+
+        // 获取当前行的列长度 (用于处理二进制数据，虽然这里暂时不处理)
+        // unsigned long* lengths = mysql_fetch_lengths(result);
+
+        for (unsigned int i = 0; i < numFields; ++i) {
+            if (row[i] == nullptr) {
+                // 处理 NULL 值
+                dbRow.emplace_back(nullptr);
+            } else {
+                // 非 NULL 值，暂时都作为字符串处理
+                // TODO: 可以根据 mysql_fetch_fields 获取的类型进行更精确的转换
+                dbRow.emplace_back(std::string(row[i]));
+            }
+        }
+        dbResult.push_back(std::move(dbRow)); // 添加行到结果集
+    }
+
+    // resultGuard 会在函数结束时自动调用 mysql_free_result
+    return dbResult;
+}
+
+// 实现 getDbType 方法
+std::string MySQLConnection::getDbType() const {
+    return "mysql";
+}
+
 
 } // namespace db

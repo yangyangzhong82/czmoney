@@ -258,9 +258,9 @@ std::vector<czmoney::TransactionLogEntry> queryTransactionLogs(
                 apiEntry.timestamp = internalEntry.timestamp;
                 apiEntry.uuid = internalEntry.uuid;
                 apiEntry.currencyType = internalEntry.currencyType;
-                // 将 int64_t (分) 转换为 double (元)
-                apiEntry.changeAmount = static_cast<double>(internalEntry.changeAmount) / 100.0;
-                apiEntry.previousAmount = static_cast<double>(internalEntry.previousAmount) / 100.0;
+                // 直接传递 int64_t (分)，因为 API 结构体现在也使用 int64_t
+                apiEntry.changeAmount = internalEntry.changeAmount;
+                apiEntry.previousAmount = internalEntry.previousAmount;
                 apiEntry.reason1 = internalEntry.reason1;
                 apiEntry.reason2 = internalEntry.reason2;
                 apiEntry.reason3 = internalEntry.reason3;

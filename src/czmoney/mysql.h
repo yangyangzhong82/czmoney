@@ -1,9 +1,10 @@
-#pragma once // 防止头文件被重复包含
-#include "ll/api/io/Logger.h" // 引入 LeviLamina 日志记录器
-#include <mysql.h>            // 引入 MySQL C API 头文件
-#include <string>             // 使用 std::string
-#include <memory>             // 可能用于智能指针 (虽然当前未使用)
-#include <stdexcept>          // 使用 std::runtime_error 作为异常基类
+#pragma once
+
+#include "czmoney/database_interface.h" // 包含数据库接口
+#include <mysql.h>
+#include <string>
+#include <memory>
+#include <stdexcept>
 
 namespace db {
 
@@ -11,25 +12,25 @@ namespace db {
  * @brief 自定义 MySQL 异常类
  *
  * 用于封装和报告 MySQL 操作中发生的错误。
- * 继承自 std::runtime_error，可以包含 MySQL 驱动返回的错误信息。
+ * 继承自 DatabaseException。
  */
-class MySQLException : public std::runtime_error {
+class MySQLException : public DatabaseException {
 public:
     /**
      * @brief 构造函数 (用于连接或常规错误)
      * @param message 自定义的错误消息
      * @param connection 可选的 MYSQL 连接指针，用于获取 mysql_error() 信息
      */
-    MySQLException(const std::string& message, MYSQL* connection = nullptr)
-        : std::runtime_error(message + (connection ? ": " + std::string(mysql_error(connection)) : "")) {}
+    explicit MySQLException(const std::string& message, MYSQL* connection = nullptr)
+        : DatabaseException(message + (connection ? ": " + std::string(mysql_error(connection)) : "")) {}
 
     /**
      * @brief 构造函数 (用于预处理语句错误)
      * @param message 自定义的错误消息
      * @param stmt MYSQL_STMT 语句句柄指针，用于获取 mysql_stmt_error() 信息
      */
-    MySQLException(const std::string& message, MYSQL_STMT* stmt)
-        : std::runtime_error(message + ": " + std::string(mysql_stmt_error(stmt))) {}
+    explicit MySQLException(const std::string& message, MYSQL_STMT* stmt)
+        : DatabaseException(message + ": " + std::string(mysql_stmt_error(stmt))) {}
 };
 
 
@@ -37,8 +38,9 @@ public:
  * @brief 封装 MySQL 数据库连接的类
  *
  * 提供连接、断开、执行查询等基本操作，并管理连接生命周期。
+ * 实现 IDatabaseConnection 接口。
  */
-class MySQLConnection {
+class MySQLConnection : public IDatabaseConnection {
 public:
     /**
      * @brief 构造函数
@@ -75,32 +77,40 @@ public:
     /**
      * @brief 连接到数据库
      * @return bool 如果连接成功返回 true，否则返回 false
-     * @throws MySQLException 如果连接过程中发生 MySQL 错误
+     * @throws MySQLException (继承自 DatabaseException) 如果连接过程中发生 MySQL 错误
      */
-    bool connect();
+    bool connect() override;
 
     /**
      * @brief 断开数据库连接
      *
      * 如果当前已连接，则关闭连接。
      */
-    void disconnect();
+    void disconnect() override;
 
     /**
      * @brief 检查当前是否已连接到数据库
      * @return bool 如果已连接返回 true，否则返回 false
      */
-    bool isConnected() const;
+    bool isConnected() const override;
 
     /**
      * @brief 执行一个简单的 SQL 查询语句
      *
-     * 这个版本不处理查询结果，主要用于执行 INSERT, UPDATE, DELETE, CREATE 等操作。
+     * 主要用于执行 INSERT, UPDATE, DELETE, CREATE 等操作。
      * @param sql 要执行的 SQL 语句字符串
-     * @return int MySQL C API 的返回值 (通常 0 表示成功，非 0 表示失败)
-     * @throws MySQLException 如果执行过程中发生 MySQL 错误
+     * @return int 通常 0 表示成功，非 0 表示失败 (MySQL 错误码)
+     * @throws MySQLException (继承自 DatabaseException) 如果执行过程中发生 MySQL 错误
      */
-    int query(const std::string& sql);
+    int execute(const std::string& sql) override;
+
+    /**
+     * @brief 执行一个返回结果集的 SQL 查询语句 (例如 SELECT)。
+     * @param sql 要执行的 SQL 查询语句。
+     * @return DbResult 包含查询结果的二维向量。如果查询失败或无结果，可能返回空向量。
+     * @throws MySQLException (继承自 DatabaseException) 执行过程中发生 MySQL 错误。
+     */
+    DbResult query(const std::string& sql) override; // 新增 query 方法声明
 
     /**
      * @brief 获取底层的 MYSQL C API 连接指针
@@ -110,6 +120,12 @@ public:
      * @return MYSQL* 指向底层 MYSQL 对象的指针，如果未连接则为 nullptr
      */
     MYSQL* getMYSQL() const;
+
+    /**
+     * @brief 获取数据库类型。
+     * @return std::string 返回 "mysql"。
+     */
+    std::string getDbType() const override; // 实现接口方法
 
 
 private:

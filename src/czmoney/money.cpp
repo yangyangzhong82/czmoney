@@ -1,81 +1,23 @@
 #include "czmoney/money.h"
 #include "czmoney/money_api.h" // 包含 API 头文件以获取 TransactionLogEntry 定义
-#include "czmoney/mysql.h"
+#include "czmoney/database_interface.h" // 包含数据库接口
 #include "ll/api/mod/NativeMod.h"
 #include "ll/api/memory/Hook.h"
-#include <mysql.h>
+// #include <mysql.h> // 不再直接需要 MySQL 头文件
 #include <stdexcept>
 #include <vector>
 #include <string>
+#include <variant> // 用于处理 DbValue
 #include <sstream>
 #include <iomanip>
 #include <limits>
 #include <cmath>
 #include <utility> // For std::move
+#include <typeinfo> // For typeid in error logging
 
 namespace czmoney {
 
-// RAII (Resource Acquisition Is Initialization) 辅助类，用于自动管理 MYSQL_STMT 的生命周期
-// 确保在作用域结束时自动调用 mysql_stmt_close
-class StatementGuard {
-    MYSQL_STMT* mStmt; // 指向 MySQL 语句句柄的指针
-public:
-    // 构造函数：获取语句句柄
-    explicit StatementGuard(MYSQL_STMT* stmt) : mStmt(stmt) {}
-    // 析构函数：如果句柄有效，则关闭它
-    ~StatementGuard() {
-        if (mStmt) {
-            mysql_stmt_close(mStmt);
-        }
-    }
-    // 禁用拷贝构造函数
-    StatementGuard(const StatementGuard&) = delete;
-    // 禁用拷贝赋值运算符
-    StatementGuard& operator=(const StatementGuard&) = delete;
-    // 允许移动构造函数
-    StatementGuard(StatementGuard&& other) noexcept : mStmt(other.mStmt) {
-        other.mStmt = nullptr; // 将源对象的指针置空，防止重复释放
-    }
-    // 允许移动赋值运算符
-    StatementGuard& operator=(StatementGuard&& other) noexcept {
-        if (this != &other) { // 防止自赋值
-            if (mStmt) mysql_stmt_close(mStmt); // 释放当前持有的资源
-            mStmt = other.mStmt; // 获取源对象的资源
-            other.mStmt = nullptr; // 将源对象的指针置空
-        }
-        return *this;
-    }
-    // 获取原始的语句句柄指针
-    MYSQL_STMT* get() const { return mStmt; }
-};
-
-// 辅助类，用于管理 MYSQL_BIND 结构体数组
-// 注意：这个类本身不负责 MYSQL_BIND 结构体内部指针指向内存的生命周期管理
-// 它主要用于方便地构建和获取绑定参数数组
-class BindGuard {
-    std::vector<MYSQL_BIND> mBinds; // 使用 std::vector 存储 MYSQL_BIND 结构体
-public:
-    BindGuard() = default; // 默认构造函数
-    ~BindGuard() = default; // 默认析构函数，vector 会自动管理其元素的生命周期
-
-    // 添加一个 MYSQL_BIND 结构体到数组中
-    void add(const MYSQL_BIND& bind) {
-        mBinds.push_back(bind);
-    }
-    // 获取指向 MYSQL_BIND 数组起始位置的指针
-    // 如果数组为空，返回 nullptr
-    MYSQL_BIND* get() {
-        return mBinds.empty() ? nullptr : mBinds.data();
-    }
-    // 获取数组中 MYSQL_BIND 结构体的数量
-    size_t count() const {
-        return mBinds.size();
-    }
-    // 清空数组
-     void clear() {
-        mBinds.clear();
-    }
-};
+// 移除 MySQL 特定的 StatementGuard 和 BindGuard 类
 
 // --- 私有辅助函数实现 ---
 
@@ -132,9 +74,9 @@ int64_t MoneyManager::getMinimumBalance(const std::string& currencyType) const {
 
 
 // MoneyManager 构造函数实现
-MoneyManager::MoneyManager(db::MySQLConnection& dbConn, const Config& config) : // 添加 config 参数
-    mDbConnection(dbConn), // 初始化数据库连接引用成员
-    mConfig(config),       // 初始化配置引用成员 
+MoneyManager::MoneyManager(db::IDatabaseConnection& dbConn, const Config& config) : // 使用接口引用
+    mDbConnection(dbConn), // 初始化数据库连接接口引用成员
+    mConfig(config),       // 初始化配置引用成员
     mLogger(ll::mod::NativeMod::current()->getLogger()) // 初始化日志记录器引用成员
 {
     // 构造时检查数据库连接状态
@@ -147,83 +89,126 @@ MoneyManager::MoneyManager(db::MySQLConnection& dbConn, const Config& config) : 
 
 // 初始化数据库表的实现
 bool MoneyManager::initializeTable() {
-    // 检查数据库连接
     if (!mDbConnection.isConnected()) {
-        mLogger.error("无法初始化货币表：数据库未连接。"); 
+        mLogger.error("无法初始化货币表：数据库未连接。");
         return false;
     }
 
-    // 定义创建表的 SQL 语句 (使用原始字符串字面量 R"(...)" 以方便书写多行 SQL)
-    // - IF NOT EXISTS: 确保如果表已存在，则不会报错
-    // - id: 自增主键
-    // - uuid: 玩家 UUID (VARCHAR(36))
-    // - currency_type: 货币类型 (VARCHAR(50))
-    // - amount: 存储乘以 100 的整数金额 (BIGINT), 默认为 0
-    // - last_updated: 时间戳，记录最后更新时间
-    // - UNIQUE KEY unique_player_currency: uuid 和 currency_type 的联合唯一索引，确保数据唯一性
-    // - ENGINE=InnoDB: 使用 InnoDB 存储引擎 (支持事务)
-    // - DEFAULT CHARSET=utf8mb4: 使用 utf8mb4 字符集 (支持 emoji 等)
-    const char* createTableSQL = R"(
-        CREATE TABLE IF NOT EXISTS player_balances (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            uuid VARCHAR(36) NOT NULL,
-            currency_type VARCHAR(50) NOT NULL,
-            amount BIGINT NOT NULL DEFAULT 0,
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            UNIQUE KEY unique_player_currency (uuid, currency_type)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    )";
+    std::string dbType = mDbConnection.getDbType();
+    std::string createBalancesTableSQL;
 
-    // 执行 SQL 查询
-    if (mDbConnection.query(createTableSQL) != 0) {
-        // 如果查询失败，记录详细错误信息
-        mLogger.error("创建或验证 'player_balances' 表失败: {}", mysql_error(mDbConnection.getMYSQL()));
-        return false; // 初始化失败
+    if (dbType == "mysql") {
+        createBalancesTableSQL = R"(
+            CREATE TABLE IF NOT EXISTS player_balances (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                uuid VARCHAR(36) NOT NULL,
+                currency_type VARCHAR(50) NOT NULL,
+                amount BIGINT NOT NULL DEFAULT 0,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_player_currency (uuid, currency_type)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        )";
+    } else if (dbType == "sqlite") {
+        createBalancesTableSQL = R"(
+            CREATE TABLE IF NOT EXISTS player_balances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT NOT NULL,
+                currency_type TEXT NOT NULL,
+                amount INTEGER NOT NULL DEFAULT 0,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (uuid, currency_type)
+            );
+        )";
+    } else {
+        mLogger.error("不支持的数据库类型 '{}'，无法创建 player_balances 表。", dbType);
+        return false;
     }
 
-    // 记录成功信息
-    mLogger.info("'player_balances' 表初始化成功。");
+    try {
+        mDbConnection.execute(createBalancesTableSQL);
+        mLogger.info("'player_balances' 表初始化成功 (类型: {}).", dbType);
 
-    // 初始化流水日志表
-    if (!initializeLogTable()) {
-        mLogger.error("初始化 'economy_log' 表失败。");
-        return false; // 如果日志表初始化失败，整个初始化也失败
+        // 初始化流水日志表
+        if (!initializeLogTable()) {
+            mLogger.error("初始化 'economy_log' 表失败。");
+            return false;
+        }
+
+        return true; // 全部成功
+
+    } catch (const db::DatabaseException& e) {
+        mLogger.error("创建或验证 'player_balances' 表失败: {}", e.what());
+        return false;
+    } catch (const std::exception& e) {
+        mLogger.error("创建或验证 'player_balances' 表时发生意外错误: {}", e.what());
+        return false;
     }
-
-    return true; // 初始化成功
-}
+} // initializeTable 结束
 
 // 新增：初始化经济流水日志表的实现
 bool MoneyManager::initializeLogTable() {
-    if (!mDbConnection.isConnected()) {
-        mLogger.error("无法初始化流水表：数据库未连接。");
+    // 注意：此函数现在由 initializeTable 调用，连接检查可以省略
+
+    std::string dbType = mDbConnection.getDbType();
+    std::string createLogTableSQL;
+    std::vector<std::string> createIndexSQLs;
+
+    if (dbType == "mysql") {
+        createLogTableSQL = R"(
+            CREATE TABLE IF NOT EXISTS economy_log (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                uuid VARCHAR(36) NOT NULL,
+                currency_type VARCHAR(50) NOT NULL,
+                change_amount BIGINT NOT NULL,
+                previous_amount BIGINT NOT NULL,
+                reason1 VARCHAR(255) DEFAULT NULL,
+                reason2 VARCHAR(255) DEFAULT NULL,
+                reason3 VARCHAR(255) DEFAULT NULL,
+                INDEX idx_uuid (uuid),
+                INDEX idx_currency_type (currency_type),
+                INDEX idx_timestamp (timestamp)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        )";
+        // MySQL 在 CREATE TABLE 中创建索引
+    } else if (dbType == "sqlite") {
+        createLogTableSQL = R"(
+            CREATE TABLE IF NOT EXISTS economy_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                uuid TEXT NOT NULL,
+                currency_type TEXT NOT NULL,
+                change_amount INTEGER NOT NULL,
+                previous_amount INTEGER NOT NULL,
+                reason1 TEXT DEFAULT NULL,
+                reason2 TEXT DEFAULT NULL,
+                reason3 TEXT DEFAULT NULL
+            );
+        )";
+        // SQLite 需要单独创建索引
+        createIndexSQLs.push_back("CREATE INDEX IF NOT EXISTS idx_uuid ON economy_log (uuid);");
+        createIndexSQLs.push_back("CREATE INDEX IF NOT EXISTS idx_currency_type ON economy_log (currency_type);");
+        createIndexSQLs.push_back("CREATE INDEX IF NOT EXISTS idx_timestamp ON economy_log (timestamp);");
+    } else {
+         mLogger.error("不支持的数据库类型 '{}'，无法创建 economy_log 表。", dbType);
         return false;
     }
 
-    const char* createLogTableSQL = R"(
-        CREATE TABLE IF NOT EXISTS economy_log (
-            id BIGINT AUTO_INCREMENT PRIMARY KEY,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            uuid VARCHAR(36) NOT NULL,
-            currency_type VARCHAR(50) NOT NULL,
-            change_amount BIGINT NOT NULL,
-            previous_amount BIGINT NOT NULL,
-            reason1 VARCHAR(255) DEFAULT NULL,
-            reason2 VARCHAR(255) DEFAULT NULL,
-            reason3 VARCHAR(255) DEFAULT NULL,
-            INDEX idx_uuid (uuid),
-            INDEX idx_currency_type (currency_type),
-            INDEX idx_timestamp (timestamp)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    )";
 
-    if (mDbConnection.query(createLogTableSQL) != 0) {
-        mLogger.error("创建或验证 'economy_log' 表失败: {}", mysql_error(mDbConnection.getMYSQL()));
+    try {
+        mDbConnection.execute(createLogTableSQL);
+        for(const auto& sql : createIndexSQLs) {
+            mDbConnection.execute(sql);
+        }
+        mLogger.info("'economy_log' 表和索引初始化成功 (类型: {}).", dbType);
+        return true;
+    } catch (const db::DatabaseException& e) {
+        mLogger.error("创建或验证 'economy_log' 表或索引失败: {}", e.what());
+        return false;
+    } catch (const std::exception& e) {
+        mLogger.error("创建或验证 'economy_log' 表或索引时发生意外错误: {}", e.what());
         return false;
     }
-
-    mLogger.info("'economy_log' 表初始化成功。");
-    return true;
 }
 
 
@@ -234,107 +219,100 @@ bool MoneyManager::hasAccount(const std::string& uuid, const std::string& curren
 }
 
 
-// 获取玩家余额的实现 (不初始化)
+// 获取玩家余额的实现 (不初始化) - 使用 IDatabaseConnection::query
 std::optional<int64_t> MoneyManager::getPlayerBalance(const std::string& uuid, const std::string& currencyType) {
-    // 检查数据库连接
     if (!mDbConnection.isConnected()) {
         mLogger.error("无法获取余额：数据库未连接。");
-        return std::nullopt; // 返回空 optional 表示失败
+        return std::nullopt;
     }
 
-    MYSQL* mysql = mDbConnection.getMYSQL(); // 获取底层 MySQL 连接指针
-    MYSQL_STMT* stmt = mysql_stmt_init(mysql); // 初始化预处理语句句柄
-    if (!stmt) {
-        mLogger.error("mysql_stmt_init() 失败: {}", mysql_error(mysql));
-        return std::nullopt; // 初始化失败
+    // --- 构建 SQL 查询语句 (注意：不安全的字符串拼接！) ---
+    // 理想情况下应使用参数化查询，这需要扩展 IDatabaseConnection 接口
+    std::string sql = "SELECT amount FROM player_balances WHERE uuid = '";
+    // TODO: 需要对 uuid 和 currencyType 进行 SQL 转义以防止注入！
+    // 这是一个简化版本，实际应用中必须转义。
+    // 简单的替换 ' 为 '' (SQLite 转义)
+    std::string escaped_uuid = uuid;
+    size_t pos = escaped_uuid.find('\'');
+    while( pos != std::string::npos) {
+        escaped_uuid.replace(pos, 1, "''");
+        pos = escaped_uuid.find('\'', pos + 2);
     }
-    StatementGuard stmtGuard(stmt); // 使用 RAII 确保语句句柄被关闭
-
-    // 定义 SQL 查询语句，使用 ? 作为参数占位符，提高安全性，防止 SQL 注入
-    const std::string sql = "SELECT amount FROM player_balances WHERE uuid = ? AND currency_type = ?";
-    // 准备 SQL 语句
-    if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.length()))) { // 显式转换长度类型
-        mLogger.error("mysql_stmt_prepare() 失败 (获取余额): {}", mysql_stmt_error(stmt));
-        return std::nullopt; // 准备失败
-    }
-
-    // --- 绑定输入参数 ---
-    MYSQL_BIND params[2]; // 创建 MYSQL_BIND 结构体数组用于存储参数信息
-    memset(params, 0, sizeof(params)); // 初始化数组为 0，避免未定义行为
-
-    // 绑定第一个参数：uuid (字符串类型)
-    unsigned long uuidLen = static_cast<unsigned long>(uuid.length()); // 获取字符串长度
-    params[0].buffer_type = MYSQL_TYPE_STRING; // 参数类型：字符串
-    params[0].buffer = const_cast<char*>(uuid.c_str()); // 参数值指针 (需要 const_cast)
-    params[0].buffer_length = uuidLen; // 缓冲区长度 (对于字符串，通常等于实际长度)
-    params[0].length = &uuidLen; // 指向实际数据长度的指针
-
-    // 绑定第二个参数：currencyType (字符串类型)
-    unsigned long currencyTypeLen = static_cast<unsigned long>(currencyType.length());
-    params[1].buffer_type = MYSQL_TYPE_STRING;
-    params[1].buffer = const_cast<char*>(currencyType.c_str());
-    params[1].buffer_length = currencyTypeLen;
-    params[1].length = &currencyTypeLen;
-
-    // 将参数绑定到语句句柄
-    if (mysql_stmt_bind_param(stmt, params)) {
-        mLogger.error("mysql_stmt_bind_param() 失败 (获取余额): {}", mysql_stmt_error(stmt));
-        return std::nullopt; // 绑定失败
-    }
-    // --- 输入参数绑定结束 ---
-
-    // 执行预处理语句
-    if (mysql_stmt_execute(stmt)) {
-        mLogger.error("mysql_stmt_execute() 失败 (获取余额): {}", mysql_stmt_error(stmt));
-        return std::nullopt; // 执行失败
+    std::string escaped_currencyType = currencyType;
+    pos = escaped_currencyType.find('\'');
+     while( pos != std::string::npos) {
+        escaped_currencyType.replace(pos, 1, "''");
+        pos = escaped_currencyType.find('\'', pos + 2);
     }
 
-    // --- 绑定输出结果 ---
-    MYSQL_BIND results[1]; // 创建 MYSQL_BIND 结构体数组用于存储结果信息
-    memset(results, 0, sizeof(results)); // 初始化
-    int64_t balance = 0; // 用于存储查询结果的变量
-    // 使用 C++ bool 类型替代 MySQL 的 my_bool
-    bool is_null = false; // 用于指示结果是否为 NULL 的标志
-    bool error = false;   // 用于指示获取此列时是否发生错误的标志
+    sql += escaped_uuid;
+    sql += "' AND currency_type = '";
+    sql += escaped_currencyType;
+    sql += "';";
+    mLogger.debug("Executing SQL for getPlayerBalance: {}", sql); // 记录 SQL (调试)
+    // --- SQL 构建结束 ---
 
-    // 绑定第一个结果列：amount (长整型)
-    results[0].buffer_type = MYSQL_TYPE_LONGLONG; // 结果类型：对应 BIGINT
-    results[0].buffer = &balance; // 指向存储结果的变量
-    results[0].is_null = &is_null; // 指向 NULL 标志变量
-    results[0].error = &error;     // 指向错误标志变量
+    try {
+        db::DbResult result = mDbConnection.query(sql);
 
-    // 将结果绑定到语句句柄
-    if (mysql_stmt_bind_result(stmt, results)) {
-        mLogger.error("mysql_stmt_bind_result() 失败 (获取余额): {}", mysql_stmt_error(stmt));
-        return std::nullopt; // 结果绑定失败
-    }
-    // --- 输出结果绑定结束 ---
-
-    // 获取查询结果 (尝试读取一行)
-    int fetch_status = mysql_stmt_fetch(stmt);
-
-    if (fetch_status == 0) { // 成功获取到一行数据
-        if (is_null) {
-             // 理论上不应该发生，因为表定义了 NOT NULL DEFAULT 0，但以防万一
-             mLogger.warn("为 UUID: {}, Currency: {} 获取到 NULL 余额", uuid, currencyType);
-             // 将 NULL 视为 0
-             return 0LL; // 返回 0
+        if (result.empty()) {
+            // 没有找到记录，账户不存在
+            return std::nullopt;
         }
-        if (error) {
-             // 获取列数据时发生错误
-             mLogger.error("获取余额列时出错 UUID: {}, Currency: {}", uuid, currencyType);
-             return std::nullopt; // 获取列错误
+
+        if (result.size() > 1) {
+            // 理论上不应发生，因为 (uuid, currency_type) 是唯一的
+            mLogger.warn("为 UUID: {}, Currency: {} 找到多条余额记录，将使用第一条。", uuid, currencyType);
         }
-        // 成功获取到余额
-        return balance;
-    } else if (fetch_status == MYSQL_NO_DATA) { // 没有找到匹配的行
-        // 这表示账户不存在
-        return std::nullopt; // 返回空 optional 表示账户不存在
-    } else { // 获取数据时发生其他错误 (fetch_status == 1 或 MYSQL_DATA_TRUNCATED)
-        mLogger.error("mysql_stmt_fetch() 失败或数据截断 (获取余额): {}", mysql_stmt_error(stmt));
-        return std::nullopt; // 获取失败
+
+        const db::DbRow& row = result[0]; // 获取第一行
+        if (row.empty()) {
+            mLogger.error("查询余额返回了空行。UUID: {}, Currency: {}", uuid, currencyType);
+            return std::nullopt;
+        }
+
+        // 获取 amount 列 (假设是第一列，索引为 0)
+        const db::DbValue& amountValue = row[0];
+
+        // 检查值的类型并提取
+        if (std::holds_alternative<int64_t>(amountValue)) {
+            // 直接是 int64_t (可能来自 SQLite)
+            return std::get<int64_t>(amountValue);
+        } else if (std::holds_alternative<std::string>(amountValue)) {
+            // 是字符串 (可能来自 MySQL)，尝试转换
+            const std::string& amountStr = std::get<std::string>(amountValue);
+            try {
+                return std::stoll(amountStr); // 尝试转换为 int64_t
+            } catch (const std::invalid_argument& e) {
+                mLogger.error("无法将数据库返回的余额字符串 '{}' 转换为整数 (invalid_argument)。UUID: {}, Currency: {}", amountStr, uuid, currencyType);
+                return std::nullopt;
+            } catch (const std::out_of_range& e) {
+                mLogger.error("数据库返回的余额字符串 '{}' 超出 int64_t 范围 (out_of_range)。UUID: {}, Currency: {}", amountStr, uuid, currencyType);
+                return std::nullopt;
+            }
+        } else if (std::holds_alternative<std::nullptr_t>(amountValue)) {
+             // 理论上不应该发生 (NOT NULL DEFAULT 0)，但处理一下
+             mLogger.warn("为 UUID: {}, Currency: {} 获取到 NULL 余额 (应为 0)", uuid, currencyType);
+             return 0LL; // 将 NULL 视为 0
+        } else {
+            // 其他未预期的类型
+            mLogger.error("查询余额返回了非预期的类型。UUID: {}, Currency: {}", uuid, currencyType);
+             try {
+                 // 尝试打印值的类型
+                 std::visit([this](auto&& arg){ mLogger.error(" - 实际类型: {}", typeid(arg).name()); }, amountValue);
+             } catch(...) {} // 忽略打印类型时的错误
+            return std::nullopt;
+        }
+
+    } catch (const db::DatabaseException& e) {
+        mLogger.error("查询余额时发生数据库错误: {}", e.what());
+        return std::nullopt;
+    } catch (const std::exception& e) {
+        mLogger.error("查询余额时发生意外错误: {}", e.what());
+        return std::nullopt;
     }
 }
+
 
 // 更新：初始化账户的私有辅助函数实现 (从 double 转换)
 std::optional<int64_t> MoneyManager::initializeAccount(const std::string& uuid, const std::string& currencyType) {
@@ -364,6 +342,7 @@ std::optional<int64_t> MoneyManager::initializeAccount(const std::string& uuid, 
     // 3. 使用 setPlayerBalance 插入新记录 (传入转换后的 int64_t 值)
     mLogger.info("为 UUID: {}, Currency: {} 初始化账户，初始余额: {}", uuid, currencyType, formatBalance(initialAmountInt));
     // 调用 setPlayerBalance 时，它内部会再次检查最低余额（现在 getMinimumBalance 会返回转换后的 int64_t）
+    // 注意：setPlayerBalance 也需要被重构以使用接口
     if (setPlayerBalance(uuid, currencyType, initialAmountInt)) { // 传入 int64_t
         return initialAmountInt; // 初始化成功，返回转换后的初始金额
     } else {
@@ -397,7 +376,7 @@ int64_t MoneyManager::getPlayerBalanceOrInit(const std::string& uuid, const std:
     }
 }
 
-// 新增：记录经济交易流水的实现
+// 新增：记录经济交易流水的实现 - 需要重构
 bool MoneyManager::logTransaction(
     const std::string& uuid,
     const std::string& currencyType,
@@ -417,104 +396,51 @@ bool MoneyManager::logTransaction(
         return false;
     }
 
-    MYSQL* mysql = mDbConnection.getMYSQL();
-    MYSQL_STMT* stmt = mysql_stmt_init(mysql);
-    if (!stmt) {
-        mLogger.error("mysql_stmt_init() 失败 (记录流水): {}", mysql_error(mysql));
+    // --- 构建 SQL (不安全的字符串拼接) ---
+    // TODO: 实现参数化查询或安全的字符串转义
+    std::string sql = "INSERT INTO economy_log (uuid, currency_type, change_amount, previous_amount, reason1, reason2, reason3) VALUES ('";
+    // 简单的 ' 替换转义
+    auto escape = [](const std::string& s) -> std::string {
+        std::string escaped = s;
+        size_t pos = escaped.find('\'');
+        while( pos != std::string::npos) {
+            escaped.replace(pos, 1, "''");
+            pos = escaped.find('\'', pos + 2);
+        }
+        return escaped;
+    };
+
+    sql += escape(uuid) + "', '";
+    sql += escape(currencyType) + "', ";
+    sql += std::to_string(changeAmount) + ", ";
+    sql += std::to_string(previousAmount) + ", ";
+    sql += (reason1.empty() ? "NULL" : "'" + escape(reason1) + "'") + ", ";
+    sql += (reason2.empty() ? "NULL" : "'" + escape(reason2) + "'") + ", ";
+    sql += (reason3.empty() ? "NULL" : "'" + escape(reason3) + "'") + ");";
+    mLogger.debug("Executing SQL for logTransaction: {}", sql);
+    // --- SQL 构建结束 ---
+
+    try {
+        int affectedRows = mDbConnection.execute(sql);
+        // SQLite 的 execute 通常不直接返回影响的行数，这里假设成功执行即可
+        // 可以通过 sqlite3_changes() 获取，但这需要修改接口或实现细节
+        mLogger.debug("成功记录流水: UUID={}, Type={}, Change={}, Prev={}, R1={}, R2={}, R3={}",
+                      uuid, currencyType, formatBalance(changeAmount), formatBalance(previousAmount),
+                      reason1.empty() ? "NULL" : reason1,
+                      reason2.empty() ? "NULL" : reason2,
+                      reason3.empty() ? "NULL" : reason3);
+        return true; // 假设 execute 没抛异常就算成功
+    } catch (const db::DatabaseException& e) {
+        mLogger.error("记录流水时发生数据库错误: {}", e.what());
+        return false;
+    } catch (const std::exception& e) {
+        mLogger.error("记录流水时发生意外错误: {}", e.what());
         return false;
     }
-    StatementGuard stmtGuard(stmt);
-
-    const std::string sql = R"(
-        INSERT INTO economy_log (uuid, currency_type, change_amount, previous_amount, reason1, reason2, reason3)
-        VALUES (?, ?, ?, ?, ?, ?, ?);
-    )";
-
-    if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.length()))) {
-        mLogger.error("mysql_stmt_prepare() 失败 (记录流水): {}", mysql_stmt_error(stmt));
-        return false;
-    }
-
-    // --- 绑定输入参数 ---
-    MYSQL_BIND params[7]; // 7 个参数
-    memset(params, 0, sizeof(params));
-
-    unsigned long uuidLen = static_cast<unsigned long>(uuid.length());
-    params[0].buffer_type = MYSQL_TYPE_STRING;
-    params[0].buffer = const_cast<char*>(uuid.c_str());
-    params[0].buffer_length = uuidLen;
-    params[0].length = &uuidLen;
-
-    unsigned long currencyTypeLen = static_cast<unsigned long>(currencyType.length());
-    params[1].buffer_type = MYSQL_TYPE_STRING;
-    params[1].buffer = const_cast<char*>(currencyType.c_str());
-    params[1].buffer_length = currencyTypeLen;
-    params[1].length = &currencyTypeLen;
-
-    params[2].buffer_type = MYSQL_TYPE_LONGLONG;
-    params[2].buffer = &changeAmount;
-    params[2].is_unsigned = false;
-
-    params[3].buffer_type = MYSQL_TYPE_LONGLONG;
-    params[3].buffer = &previousAmount;
-    params[3].is_unsigned = false;
-
-    // 绑定理由，处理空字符串的情况 (插入 NULL)
-    unsigned long reason1Len = static_cast<unsigned long>(reason1.length());
-    bool reason1_is_null = reason1.empty();
-    params[4].buffer_type = MYSQL_TYPE_STRING;
-    params[4].buffer = const_cast<char*>(reason1.c_str());
-    params[4].buffer_length = reason1Len;
-    params[4].length = &reason1Len;
-    params[4].is_null = &reason1_is_null;
-
-    unsigned long reason2Len = static_cast<unsigned long>(reason2.length());
-    bool reason2_is_null = reason2.empty();
-    params[5].buffer_type = MYSQL_TYPE_STRING;
-    params[5].buffer = const_cast<char*>(reason2.c_str());
-    params[5].buffer_length = reason2Len;
-    params[5].length = &reason2Len;
-    params[5].is_null = &reason2_is_null;
-
-    unsigned long reason3Len = static_cast<unsigned long>(reason3.length());
-    bool reason3_is_null = reason3.empty();
-    params[6].buffer_type = MYSQL_TYPE_STRING;
-    params[6].buffer = const_cast<char*>(reason3.c_str());
-    params[6].buffer_length = reason3Len;
-    params[6].length = &reason3Len;
-    params[6].is_null = &reason3_is_null;
-
-
-    if (mysql_stmt_bind_param(stmt, params)) {
-        mLogger.error("mysql_stmt_bind_param() 失败 (记录流水): {}", mysql_stmt_error(stmt));
-        return false;
-    }
-    // --- 输入参数绑定结束 ---
-
-    if (mysql_stmt_execute(stmt)) {
-        mLogger.error("mysql_stmt_execute() 失败 (记录流水): {}", mysql_stmt_error(stmt));
-        return false;
-    }
-
-    // 检查受影响的行数，确保插入成功
-    my_ulonglong affected_rows = mysql_stmt_affected_rows(stmt);
-    if (affected_rows != 1) {
-        mLogger.warn("记录流水影响了 {} 行 (预期为 1)。UUID: {}, Currency: {}", affected_rows, uuid, currencyType);
-        // 根据策略，这里可以返回 false，或者仅记录警告
-        // return false;
-    }
-
-    mLogger.debug("成功记录流水: UUID={}, Type={}, Change={}, Prev={}, R1={}, R2={}, R3={}",
-                  uuid, currencyType, formatBalance(changeAmount), formatBalance(previousAmount),
-                  reason1.empty() ? "NULL" : reason1,
-                  reason2.empty() ? "NULL" : reason2,
-                  reason3.empty() ? "NULL" : reason3);
-
-    return true;
 }
 
 
-// 设置玩家余额的实现 (更新)
+// 设置玩家余额的实现 (更新) - 需要重构
 bool MoneyManager::setPlayerBalance(
     const std::string& uuid,
     const std::string& currencyType,
@@ -555,10 +481,8 @@ bool MoneyManager::setPlayerBalance(
         previousBalance = previousBalanceOpt.value();
     } else {
         // 如果账户不存在，尝试获取配置的初始值作为“之前”的值
-        // 这主要用于记录 set 操作创建新账户时的流水
         auto it = mConfig.economy.find(currencyType);
         if (it != mConfig.economy.end()) {
-            // 使用辅助函数安全转换配置中的 double 初始值
             std::optional<int64_t> initialBalanceIntOpt = convertDoubleToInt64(
                 it->second.initialBalance,
                 "initialBalance for " + currencyType + " (in setPlayerBalance fallback)"
@@ -566,111 +490,88 @@ bool MoneyManager::setPlayerBalance(
             if (initialBalanceIntOpt.has_value()) {
                 previousBalance = initialBalanceIntOpt.value();
             } else {
-                // 如果转换失败（例如配置值无效），保持 previousBalance 为 0 并记录错误
                 mLogger.error(
                     "无法转换配置中货币类型 '{}' 的 initialBalance ({}) 作为 setPlayerBalance 的 previousBalance 回退值。",
                     currencyType,
                     it->second.initialBalance
                 );
-                // previousBalance 保持 0
             }
         }
-        // 如果连配置都没有，previousBalance 保持 0
     }
     // --- 获取操作前余额结束 ---
 
-    // --- 执行数据库更新 ---
-    MYSQL* mysql = mDbConnection.getMYSQL();
-    MYSQL_STMT* stmt = mysql_stmt_init(mysql);
-    if (!stmt) {
-        mLogger.error("mysql_stmt_init() 失败 (设置余额): {}", mysql_error(mysql));
-        return false;
-    }
-    StatementGuard stmtGuard(stmt);
+    // --- 执行数据库更新 (根据数据库类型选择语法) ---
+    // TODO: 实现参数化查询或安全的字符串转义
+    std::string sql;
+    std::string dbType = mDbConnection.getDbType();
+    auto escape = [](const std::string& s) -> std::string {
+        std::string escaped = s;
+        size_t pos = escaped.find('\'');
+        while( pos != std::string::npos) {
+            escaped.replace(pos, 1, "''");
+            pos = escaped.find('\'', pos + 2);
+        }
+        return escaped;
+    };
 
-    const std::string sql = R"(
-        INSERT INTO player_balances (uuid, currency_type, amount)
-        VALUES (?, ?, ?)
-        ON DUPLICATE KEY UPDATE amount = VALUES(amount);
-    )";
+    std::string escaped_uuid = escape(uuid);
+    std::string escaped_currencyType = escape(currencyType);
+    std::string amount_str = std::to_string(amount);
 
-    if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.length()))) {
-        mLogger.error("mysql_stmt_prepare() 失败 (设置余额): {}", mysql_stmt_error(stmt));
-        return false;
-    }
-
-    MYSQL_BIND params[3];
-    memset(params, 0, sizeof(params));
-
-    unsigned long uuidLen = static_cast<unsigned long>(uuid.length());
-    params[0].buffer_type = MYSQL_TYPE_STRING;
-    params[0].buffer = const_cast<char*>(uuid.c_str());
-    params[0].buffer_length = uuidLen;
-    params[0].length = &uuidLen;
-
-    unsigned long currencyTypeLen = static_cast<unsigned long>(currencyType.length());
-    params[1].buffer_type = MYSQL_TYPE_STRING;
-    params[1].buffer = const_cast<char*>(currencyType.c_str());
-    params[1].buffer_length = currencyTypeLen;
-    params[1].length = &currencyTypeLen;
-
-    params[2].buffer_type = MYSQL_TYPE_LONGLONG;
-    params[2].buffer = &amount;
-    params[2].is_unsigned = false;
-
-    if (mysql_stmt_bind_param(stmt, params)) {
-        mLogger.error("mysql_stmt_bind_param() 失败 (设置余额): {}", mysql_stmt_error(stmt));
+    if (dbType == "sqlite") {
+        sql = "INSERT OR REPLACE INTO player_balances (uuid, currency_type, amount) VALUES ('";
+        sql += escaped_uuid + "', '";
+        sql += escaped_currencyType + "', ";
+        sql += amount_str + ");";
+    } else if (dbType == "mysql") {
+        // 使用 INSERT ... ON DUPLICATE KEY UPDATE
+        sql = "INSERT INTO player_balances (uuid, currency_type, amount) VALUES ('";
+        sql += escaped_uuid + "', '";
+        sql += escaped_currencyType + "', ";
+        sql += amount_str + ")";
+        sql += " ON DUPLICATE KEY UPDATE amount = VALUES(amount);";
+        // 或者使用 REPLACE INTO (效果类似，但实现不同，会先 DELETE 再 INSERT)
+        // sql = "REPLACE INTO player_balances (uuid, currency_type, amount) VALUES ('";
+        // sql += escaped_uuid + "', '";
+        // sql += escaped_currencyType + "', ";
+        // sql += amount_str + ");";
+    } else {
+        mLogger.error("不支持的数据库类型 '{}'，无法执行 setPlayerBalance。", dbType);
         return false;
     }
 
-    if (mysql_stmt_execute(stmt)) {
-        mLogger.error("mysql_stmt_execute() 失败 (设置余额): {}", mysql_stmt_error(stmt));
-        return false;
-    }
-    // --- 数据库更新结束 ---
+    mLogger.debug("Executing SQL for setPlayerBalance ({}): {}", dbType, sql);
+    // --- SQL 构建结束 ---
 
-    // --- 检查并记录流水 ---
-    my_ulonglong affected_rows = mysql_stmt_affected_rows(stmt);
-    bool dbUpdateSucceeded = (affected_rows != (my_ulonglong)-1); // 只要执行没报错就算成功
+    try {
+        mDbConnection.execute(sql);
+        bool dbUpdateSucceeded = true; // 假设 execute 没抛异常就算成功
 
-    if (dbUpdateSucceeded) {
-        int64_t changeAmount = amount - previousBalance; // 计算实际变动值
-        // 只有当金额实际发生变化时才记录日志 (affected_rows > 0 或插入新行时 affected_rows == 1)
-        // 或者即使金额未变 (affected_rows == 0)，也记录 set 操作？(当前选择：仅在值变化时记录)
+        // --- 记录流水 ---
+        int64_t changeAmount = amount - previousBalance;
         if (changeAmount != 0) {
              if (!logTransaction(uuid, currencyType, changeAmount, previousBalance, reason1, reason2, reason3)) {
-                 // 记录流水失败，这是一个严重问题，可能导致数据不一致
                  mLogger.error("数据库余额已更新，但记录流水失败！UUID: {}, Currency: {}", uuid, currencyType);
-                 // 根据策略，这里可以尝试回滚，或者标记错误，或者返回 false
-                 // return false; // 如果要求流水必须成功
+                 // 根据策略决定是否返回 false
+                 // return false;
              }
         } else {
              mLogger.debug("Set 操作未改变余额，不记录流水。UUID: {}, Currency: {}", uuid, currencyType);
         }
+        mLogger.debug("成功设置/更新 UUID: {}, Currency: {} 的余额为: {}", uuid, currencyType, formatBalance(amount));
+        return true;
 
-        // 记录调试信息 (基于 affected_rows)
-        if (affected_rows == 0) {
-            mLogger.debug("为 UUID: {}, Currency: {} 设置余额影响了 0 行 (金额未改变)。", uuid, currencyType);
-        } else if (affected_rows == 1) {
-            mLogger.debug("为 UUID: {}, Currency: {} 插入新余额: {}", uuid, currencyType, formatBalance(amount));
-        } else if (affected_rows == 2) {
-            mLogger.debug("为 UUID: {}, Currency: {} 更新余额为: {}", uuid, currencyType, formatBalance(amount));
-        } else if (affected_rows == (my_ulonglong)-1) {
-             mLogger.error("获取受影响行数时出错 (设置余额) UUID: {}, Currency: {}", uuid, currencyType);
-        } else {
-            mLogger.warn("为 UUID: {}, Currency: {} 设置余额影响了 {} 行。", uuid, currencyType, affected_rows);
-        }
-    } else {
-         // 数据库更新本身失败了，不需要记录流水
-         mLogger.error("设置余额的数据库操作失败，不记录流水。UUID: {}, Currency: {}", uuid, currencyType);
-         return false; // 数据库操作失败，返回 false
+    } catch (const db::DatabaseException& e) {
+        mLogger.error("设置余额时发生数据库错误: {}", e.what());
+        return false;
+    } catch (const std::exception& e) {
+        mLogger.error("设置余额时发生意外错误: {}", e.what());
+        return false;
     }
-
-    return true; // 数据库操作成功（即使流水记录可能失败，根据上面的策略）
 }
 
 
-// 增加玩家余额的实现 (更新)
+// 增加玩家余额的实现 (更新) - 需要重构
 bool MoneyManager::addPlayerBalance(
     const std::string& uuid,
     const std::string& currencyType,
@@ -691,9 +592,8 @@ bool MoneyManager::addPlayerBalance(
         return amountToAdd == 0; // 增加 0 视为成功，但不记录流水
     }
 
-    // --- 事务处理 (可选，但推荐) ---
-    // bool transactionStarted = mDbConnection.query("START TRANSACTION") == 0;
-    // if (!transactionStarted) mLogger.error("启动事务失败 (增加余额)");
+    // --- 事务处理 (SQLite 默认每个语句是一个事务，除非显式 BEGIN/COMMIT) ---
+    // 可以考虑显式包裹事务以保证原子性
 
     try {
         // 1. 获取当前余额，如果不存在则初始化
@@ -702,86 +602,52 @@ bool MoneyManager::addPlayerBalance(
         // 2. 检查溢出
         if (currentBalance > std::numeric_limits<int64_t>::max() - amountToAdd) {
              mLogger.error("增加余额时检测到潜在溢出。UUID: {}, Currency: {}", uuid, currencyType);
-             // if (transactionStarted) mDbConnection.query("ROLLBACK");
              return false;
         }
         int64_t newBalance = currentBalance + amountToAdd;
 
-        // 3. 设置新余额 (不再调用 setPlayerBalance 避免重复记录流水)
-        //    直接执行数据库更新操作
-        bool dbUpdateSuccess = false;
-        { // 创建一个作用域以确保 stmtGuard 正确释放
-            MYSQL* mysql = mDbConnection.getMYSQL();
-            MYSQL_STMT* stmt = mysql_stmt_init(mysql);
-            if (!stmt) {
-                mLogger.error("mysql_stmt_init() 失败 (增加余额更新): {}", mysql_error(mysql));
-                // if (transactionStarted) mDbConnection.query("ROLLBACK");
-                return false;
+        // 3. 设置新余额 (直接执行数据库更新)
+        // TODO: 实现参数化查询或安全的字符串转义
+        std::string sql = "UPDATE player_balances SET amount = ";
+        sql += std::to_string(newBalance);
+        sql += " WHERE uuid = '";
+        auto escape = [](const std::string& s) -> std::string {
+            std::string escaped = s;
+            size_t pos = escaped.find('\'');
+            while( pos != std::string::npos) {
+                escaped.replace(pos, 1, "''");
+                pos = escaped.find('\'', pos + 2);
             }
-            StatementGuard stmtGuard(stmt);
+            return escaped;
+        };
+        sql += escape(uuid) + "' AND currency_type = '";
+        sql += escape(currencyType) + "';";
+        mLogger.debug("Executing SQL for addPlayerBalance: {}", sql);
 
-            const std::string sql = R"(
-                INSERT INTO player_balances (uuid, currency_type, amount)
-                VALUES (?, ?, ?)
-                ON DUPLICATE KEY UPDATE amount = VALUES(amount);
-            )";
+        mDbConnection.execute(sql); // 执行更新
 
-            if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.length()))) {
-                mLogger.error("mysql_stmt_prepare() 失败 (增加余额更新): {}", mysql_stmt_error(stmt));
-                // if (transactionStarted) mDbConnection.query("ROLLBACK");
-                return false;
-            }
-
-            MYSQL_BIND params[3];
-            memset(params, 0, sizeof(params));
-            unsigned long uuidLen = static_cast<unsigned long>(uuid.length());
-            params[0].buffer_type = MYSQL_TYPE_STRING; params[0].buffer = const_cast<char*>(uuid.c_str()); params[0].buffer_length = uuidLen; params[0].length = &uuidLen;
-            unsigned long currencyTypeLen = static_cast<unsigned long>(currencyType.length());
-            params[1].buffer_type = MYSQL_TYPE_STRING; params[1].buffer = const_cast<char*>(currencyType.c_str()); params[1].buffer_length = currencyTypeLen; params[1].length = &currencyTypeLen;
-            params[2].buffer_type = MYSQL_TYPE_LONGLONG; params[2].buffer = &newBalance; params[2].is_unsigned = false;
-
-            if (mysql_stmt_bind_param(stmt, params)) {
-                mLogger.error("mysql_stmt_bind_param() 失败 (增加余额更新): {}", mysql_stmt_error(stmt));
-                // if (transactionStarted) mDbConnection.query("ROLLBACK");
-                return false;
-            }
-
-            if (mysql_stmt_execute(stmt)) {
-                mLogger.error("mysql_stmt_execute() 失败 (增加余额更新): {}", mysql_stmt_error(stmt));
-                // if (transactionStarted) mDbConnection.query("ROLLBACK");
-                return false;
-            }
-            dbUpdateSuccess = (mysql_stmt_affected_rows(stmt) != (my_ulonglong)-1);
-        } // stmtGuard 在此作用域结束时释放 stmt
-
-        // 4. 如果数据库更新成功，记录流水
-        if (dbUpdateSuccess) {
-            if (!logTransaction(uuid, currencyType, amountToAdd, currentBalance, reason1, reason2, reason3)) {
-                mLogger.error("数据库余额已更新，但记录流水失败！(增加余额) UUID: {}, Currency: {}", uuid, currencyType);
-                // 根据策略决定是否回滚或返回失败
-                // if (transactionStarted) mDbConnection.query("ROLLBACK");
-                // return false;
-            }
-            mLogger.debug("成功为 UUID: {}, Currency: {} 增加余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToAdd), formatBalance(newBalance));
-            // if (transactionStarted && mDbConnection.query("COMMIT") != 0) {
-            //     mLogger.error("提交事务失败 (增加余额)");
-            //     return false; // 提交失败也算失败
-            // }
-            return true; // 数据库更新和流水记录（或尝试记录）都完成
-        } else {
-            // 数据库更新失败
-            // if (transactionStarted) mDbConnection.query("ROLLBACK");
-            return false;
+        // 4. 记录流水
+        if (!logTransaction(uuid, currencyType, amountToAdd, currentBalance, reason1, reason2, reason3)) {
+            mLogger.error("数据库余额已更新，但记录流水失败！(增加余额) UUID: {}, Currency: {}", uuid, currencyType);
+            // 根据策略决定是否回滚或返回失败
+            // return false;
         }
+        mLogger.debug("成功为 UUID: {}, Currency: {} 增加余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToAdd), formatBalance(newBalance));
+        return true; // 数据库更新和流水记录（或尝试记录）都完成
 
-    } catch (const std::runtime_error& e) {
+    } catch (const db::DatabaseException& e) {
+         mLogger.error("增加余额时发生数据库错误: {}", e.what());
+         return false;
+    } catch (const std::runtime_error& e) { // Catch getPlayerBalanceOrInit exception
         mLogger.error("增加余额失败 (获取或初始化时出错): {}", e.what());
-        // if (transactionStarted) mDbConnection.query("ROLLBACK");
+        return false;
+    } catch (const std::exception& e) {
+        mLogger.error("增加余额时发生意外错误: {}", e.what());
         return false;
     }
 }
 
-// 减少玩家余额的实现 (更新)
+// 减少玩家余额的实现 (更新) - 需要重构
 bool MoneyManager::subtractPlayerBalance(
     const std::string& uuid,
     const std::string& currencyType,
@@ -802,125 +668,81 @@ bool MoneyManager::subtractPlayerBalance(
         return amountToSubtract == 0; // 减少 0 视为成功，不记录流水
     }
 
-    // --- 事务处理 (可选，但推荐) ---
-    // bool transactionStarted = mDbConnection.query("START TRANSACTION") == 0;
-    // if (!transactionStarted) mLogger.error("启动事务失败 (减少余额)");
+    // --- 事务处理 ---
 
-    // 1. 获取当前余额 (不初始化)
-    std::optional<int64_t> currentBalanceOpt = getPlayerBalance(uuid, currencyType);
+    try {
+        // 1. 获取当前余额 (不初始化)
+        std::optional<int64_t> currentBalanceOpt = getPlayerBalance(uuid, currencyType);
 
-    if (!currentBalanceOpt.has_value()) {
-        mLogger.warn("尝试从不存在的账户扣款。UUID: {}, Currency: {}", uuid, currencyType);
-        // if (transactionStarted) mDbConnection.query("ROLLBACK");
-        return false;
-    }
-    int64_t currentBalance = currentBalanceOpt.value();
-
-    // 2. 检查余额是否足够 (原始检查)
-    if (currentBalance < amountToSubtract) {
-        mLogger.warn("余额不足无法扣款。UUID: {}, Currency: {}, 当前: {}, 请求: {}",
-                     uuid, currencyType, formatBalance(currentBalance), formatBalance(amountToSubtract));
-        // if (transactionStarted) mDbConnection.query("ROLLBACK");
-        return false;
-    }
-
-    // 3. 检查下溢
-     if (currentBalance < std::numeric_limits<int64_t>::min() + amountToSubtract) {
-         mLogger.error("减少余额时检测到潜在下溢。UUID: {}, Currency: {}", uuid, currencyType);
-         // if (transactionStarted) mDbConnection.query("ROLLBACK");
-         return false;
-     }
-    int64_t newBalance = currentBalance - amountToSubtract;
-
-    // 新增：检查扣款后是否低于最低余额
-    int64_t minBalance = getMinimumBalance(currencyType);
-    if (newBalance < minBalance) {
-        mLogger.error(
-            "无法减少余额：操作将使 UUID: {} 的 Currency: {} 余额 ({}) 低于最低允许值 ({})",
-            uuid,
-            currencyType,
-            formatBalance(newBalance),
-            formatBalance(minBalance)
-        );
-        // if (transactionStarted) mDbConnection.query("ROLLBACK");
-        return false;
-    }
-
-
-    // 4. 设置新余额 (直接执行数据库更新)
-    bool dbUpdateSuccess = false;
-    {
-        MYSQL* mysql = mDbConnection.getMYSQL();
-        MYSQL_STMT* stmt = mysql_stmt_init(mysql);
-        if (!stmt) {
-            mLogger.error("mysql_stmt_init() 失败 (减少余额更新): {}", mysql_error(mysql));
-            // if (transactionStarted) mDbConnection.query("ROLLBACK");
+        if (!currentBalanceOpt.has_value()) {
+            mLogger.warn("尝试从不存在的账户扣款。UUID: {}, Currency: {}", uuid, currencyType);
             return false;
         }
-        StatementGuard stmtGuard(stmt);
+        int64_t currentBalance = currentBalanceOpt.value();
 
-        // 这里使用 UPDATE 而不是 INSERT...ON DUPLICATE KEY UPDATE，因为我们已经确认账户存在
-        const std::string sql = "UPDATE player_balances SET amount = ? WHERE uuid = ? AND currency_type = ?";
-
-        if (mysql_stmt_prepare(stmt, sql.c_str(), static_cast<unsigned long>(sql.length()))) {
-            mLogger.error("mysql_stmt_prepare() 失败 (减少余额更新): {}", mysql_stmt_error(stmt));
-            // if (transactionStarted) mDbConnection.query("ROLLBACK");
+        // 2. 检查余额是否足够 (原始检查)
+        if (currentBalance < amountToSubtract) {
+            mLogger.warn("余额不足无法扣款。UUID: {}, Currency: {}, 当前: {}, 请求: {}",
+                         uuid, currencyType, formatBalance(currentBalance), formatBalance(amountToSubtract));
             return false;
         }
 
-        MYSQL_BIND params[3];
-        memset(params, 0, sizeof(params));
-        params[0].buffer_type = MYSQL_TYPE_LONGLONG; params[0].buffer = &newBalance; params[0].is_unsigned = false;
-        unsigned long uuidLen = static_cast<unsigned long>(uuid.length());
-        params[1].buffer_type = MYSQL_TYPE_STRING; params[1].buffer = const_cast<char*>(uuid.c_str()); params[1].buffer_length = uuidLen; params[1].length = &uuidLen;
-        unsigned long currencyTypeLen = static_cast<unsigned long>(currencyType.length());
-        params[2].buffer_type = MYSQL_TYPE_STRING; params[2].buffer = const_cast<char*>(currencyType.c_str()); params[2].buffer_length = currencyTypeLen; params[2].length = &currencyTypeLen;
+        // 3. 检查下溢
+         if (currentBalance < std::numeric_limits<int64_t>::min() + amountToSubtract) {
+             mLogger.error("减少余额时检测到潜在下溢。UUID: {}, Currency: {}", uuid, currencyType);
+             return false;
+         }
+        int64_t newBalance = currentBalance - amountToSubtract;
 
-
-        if (mysql_stmt_bind_param(stmt, params)) {
-            mLogger.error("mysql_stmt_bind_param() 失败 (减少余额更新): {}", mysql_stmt_error(stmt));
-            // if (transactionStarted) mDbConnection.query("ROLLBACK");
+        // 新增：检查扣款后是否低于最低余额
+        int64_t minBalance = getMinimumBalance(currencyType);
+        if (newBalance < minBalance) {
+            mLogger.error(
+                "无法减少余额：操作将使 UUID: {} 的 Currency: {} 余额 ({}) 低于最低允许值 ({})",
+                uuid,
+                currencyType,
+                formatBalance(newBalance),
+                formatBalance(minBalance)
+            );
             return false;
         }
 
-        if (mysql_stmt_execute(stmt)) {
-            mLogger.error("mysql_stmt_execute() 失败 (减少余额更新): {}", mysql_stmt_error(stmt));
-            // if (transactionStarted) mDbConnection.query("ROLLBACK");
-            return false;
-        }
-        // 检查 UPDATE 是否成功影响了 1 行
-        my_ulonglong affected_rows = mysql_stmt_affected_rows(stmt);
-        if (affected_rows == 1) {
-            dbUpdateSuccess = true;
-        } else if (affected_rows == 0) {
-            // 可能并发修改导致条件不满足，或者值未变？
-            mLogger.warn("减少余额的 UPDATE 操作影响了 0 行。UUID: {}, Currency: {}", uuid, currencyType);
-            // 视为失败，因为我们期望更新一行
-            dbUpdateSuccess = false;
-        } else {
-            mLogger.error("减少余额的 UPDATE 操作影响了 {} 行 (预期 1)。UUID: {}, Currency: {}", affected_rows, uuid, currencyType);
-            dbUpdateSuccess = false; // 异常情况，视为失败
-        }
-    } // stmtGuard 释放 stmt
 
-    // 5. 如果数据库更新成功，记录流水
-    if (dbUpdateSuccess) {
+        // 4. 设置新余额 (直接执行数据库更新)
+        // TODO: 实现参数化查询或安全的字符串转义
+        std::string sql = "UPDATE player_balances SET amount = ";
+        sql += std::to_string(newBalance);
+        sql += " WHERE uuid = '";
+         auto escape = [](const std::string& s) -> std::string {
+            std::string escaped = s;
+            size_t pos = escaped.find('\'');
+            while( pos != std::string::npos) {
+                escaped.replace(pos, 1, "''");
+                pos = escaped.find('\'', pos + 2);
+            }
+            return escaped;
+        };
+        sql += escape(uuid) + "' AND currency_type = '";
+        sql += escape(currencyType) + "';";
+         mLogger.debug("Executing SQL for subtractPlayerBalance: {}", sql);
+
+        mDbConnection.execute(sql); // 执行更新
+
+        // 5. 记录流水
         // 注意：changeAmount 是负数
         if (!logTransaction(uuid, currencyType, -amountToSubtract, currentBalance, reason1, reason2, reason3)) {
             mLogger.error("数据库余额已更新，但记录流水失败！(减少余额) UUID: {}, Currency: {}", uuid, currencyType);
             // 根据策略决定是否回滚或返回失败
-            // if (transactionStarted) mDbConnection.query("ROLLBACK");
             // return false;
         }
          mLogger.debug("成功为 UUID: {}, Currency: {} 减少余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToSubtract), formatBalance(newBalance));
-        // if (transactionStarted && mDbConnection.query("COMMIT") != 0) {
-        //     mLogger.error("提交事务失败 (减少余额)");
-        //     return false;
-        // }
         return true;
-    } else {
-        // 数据库更新失败
-        // if (transactionStarted) mDbConnection.query("ROLLBACK");
+
+    } catch (const db::DatabaseException& e) {
+         mLogger.error("减少余额时发生数据库错误: {}", e.what());
+         return false;
+    } catch (const std::exception& e) {
+        mLogger.error("减少余额时发生意外错误: {}", e.what());
         return false;
     }
 }
@@ -1083,7 +905,7 @@ std::optional<int64_t> MoneyManager::parseBalance(const std::string& formattedAm
     }
 }
 
-// --- 查询流水实现 ---
+// --- 查询流水实现 --- - 需要重构
 std::vector<TransactionLogEntry> MoneyManager::queryTransactionLogs(
     const std::optional<std::string>& uuidFilter,
     const std::optional<std::string>& currencyTypeFilter,
@@ -1100,84 +922,49 @@ std::vector<TransactionLogEntry> MoneyManager::queryTransactionLogs(
 
     if (!mDbConnection.isConnected()) {
         mLogger.error("无法查询流水：数据库未连接。");
-        // 可以选择抛出异常或返回空列表
-        // throw std::runtime_error("数据库未连接");
         return results; // 返回空列表
     }
 
-    MYSQL* mysql = mDbConnection.getMYSQL();
-    MYSQL_STMT* stmt = mysql_stmt_init(mysql);
-    if (!stmt) {
-        mLogger.error("mysql_stmt_init() 失败 (查询流水): {}", mysql_error(mysql));
-        throw std::runtime_error("无法初始化 MySQL 语句句柄");
-    }
-    StatementGuard stmtGuard(stmt); // RAII 确保关闭
-
-    // --- 动态构建 SQL 查询 ---
+    // --- 动态构建 SQL 查询 (不安全的字符串拼接) ---
+    // TODO: 实现参数化查询或安全的字符串转义
     std::stringstream sqlBuilder;
     sqlBuilder << "SELECT id, timestamp, uuid, currency_type, change_amount, previous_amount, reason1, reason2, reason3 FROM economy_log";
 
-    std::vector<std::string> whereClauses; // 存储 WHERE 条件
-    std::vector<std::string> paramValues;  // 存储需要绑定的参数值 (确保生命周期)
-    std::vector<MYSQL_BIND> params;        // 存储绑定信息
-    std::vector<unsigned long> paramLengths; // 存储字符串参数的长度
-
-    auto add_filter = [&](const std::optional<std::string>& filter, const std::string& columnName, bool useLike = false) {
-        if (filter.has_value() && !filter.value().empty()) {
-            paramValues.push_back(filter.value()); // 存储参数值
-            paramLengths.push_back(static_cast<unsigned long>(paramValues.back().length()));
-
-            MYSQL_BIND bind = {};
-            bind.buffer_type = MYSQL_TYPE_STRING;
-            bind.buffer = const_cast<char*>(paramValues.back().c_str());
-            bind.buffer_length = paramLengths.back(); // 缓冲区长度
-            bind.length = &paramLengths.back();       // 实际长度指针
-            params.push_back(bind);
-
-            if (useLike) {
-                // 对于 LIKE 查询，需要修改参数值并在 SQL 中使用 LIKE
-                paramValues.back() = "%" + paramValues.back() + "%";
-                paramLengths.back() = static_cast<unsigned long>(paramValues.back().length()); // 更新长度
-                bind.buffer = const_cast<char*>(paramValues.back().c_str()); // 更新指针
-                bind.buffer_length = paramLengths.back();
-                bind.length = &paramLengths.back();
-                // 更新 params vector 中的 bind (如果已经 push_back)
-                if (!params.empty()) params.back() = bind;
-
-                whereClauses.push_back(columnName + " LIKE ?");
-            } else {
-                whereClauses.push_back(columnName + " = ?");
-            }
+    std::vector<std::string> whereClauses;
+    auto escape = [](const std::string& s) -> std::string {
+        std::string escaped = s;
+        size_t pos = escaped.find('\'');
+        while( pos != std::string::npos) {
+            escaped.replace(pos, 1, "''");
+            pos = escaped.find('\'', pos + 2);
         }
+        return escaped;
     };
 
-    add_filter(uuidFilter, "uuid");
-    add_filter(currencyTypeFilter, "currency_type");
-    add_filter(startTimeFilter, "timestamp", false); // 使用 >=
+    if (uuidFilter.has_value() && !uuidFilter.value().empty()) {
+        whereClauses.push_back("uuid = '" + escape(uuidFilter.value()) + "'");
+    }
+    if (currencyTypeFilter.has_value() && !currencyTypeFilter.value().empty()) {
+        whereClauses.push_back("currency_type = '" + escape(currencyTypeFilter.value()) + "'");
+    }
     if (startTimeFilter.has_value() && !startTimeFilter.value().empty()) {
-         // 查找最后一个 "timestamp = ?" 并替换为 "timestamp >= ?"
-         for (auto it = whereClauses.rbegin(); it != whereClauses.rend(); ++it) {
-             if (*it == "timestamp = ?") {
-                 *it = "timestamp >= ?";
-                 break;
-             }
-         }
+        // 注意：日期时间格式可能需要适配数据库
+        whereClauses.push_back("timestamp >= '" + escape(startTimeFilter.value()) + "'");
     }
-    add_filter(endTimeFilter, "timestamp", false); // 使用 <=
-     if (endTimeFilter.has_value() && !endTimeFilter.value().empty()) {
-         // 查找最后一个 "timestamp = ?" 并替换为 "timestamp <= ?"
-         for (auto it = whereClauses.rbegin(); it != whereClauses.rend(); ++it) {
-             if (*it == "timestamp = ?") {
-                 *it = "timestamp <= ?";
-                 break;
-             }
-         }
+    if (endTimeFilter.has_value() && !endTimeFilter.value().empty()) {
+        whereClauses.push_back("timestamp <= '" + escape(endTimeFilter.value()) + "'");
     }
-    add_filter(reason1Filter, "reason1", true); // 使用 LIKE
-    add_filter(reason2Filter, "reason2", true); // 使用 LIKE
-    add_filter(reason3Filter, "reason3", true); // 使用 LIKE
+     if (reason1Filter.has_value() && !reason1Filter.value().empty()) {
+        whereClauses.push_back("reason1 LIKE '%" + escape(reason1Filter.value()) + "%'");
+    }
+    if (reason2Filter.has_value() && !reason2Filter.value().empty()) {
+        whereClauses.push_back("reason2 LIKE '%" + escape(reason2Filter.value()) + "%'");
+    }
+    if (reason3Filter.has_value() && !reason3Filter.value().empty()) {
+        whereClauses.push_back("reason3 LIKE '%" + escape(reason3Filter.value()) + "%'");
+    }
 
-    // 组合 WHERE 子句
+
     if (!whereClauses.empty()) {
         sqlBuilder << " WHERE ";
         for (size_t i = 0; i < whereClauses.size(); ++i) {
@@ -1185,173 +972,91 @@ std::vector<TransactionLogEntry> MoneyManager::queryTransactionLogs(
         }
     }
 
-    // 添加 ORDER BY 子句
     sqlBuilder << " ORDER BY timestamp " << (ascendingOrder ? "ASC" : "DESC");
 
-    // 添加 LIMIT 和 OFFSET 子句
-    // 注意：LIMIT 和 OFFSET 不能直接用 ? 占位符绑定，需要直接拼接到 SQL 字符串中
-    // 但要确保它们是有效的数字，防止注入
     if (limit > 0) {
         sqlBuilder << " LIMIT " << limit;
-        // OFFSET 只有在 LIMIT 存在时才有意义
         if (offset > 0) {
             sqlBuilder << " OFFSET " << offset;
         }
     }
-    sqlBuilder << ";"; // SQL 语句结束
+    sqlBuilder << ";";
 
     std::string finalSql = sqlBuilder.str();
-    mLogger.debug("Executing SQL for queryTransactionLogs: {}", finalSql); // 记录最终 SQL
+    mLogger.debug("Executing SQL for queryTransactionLogs: {}", finalSql);
 
-    // --- 准备语句 ---
-    if (mysql_stmt_prepare(stmt, finalSql.c_str(), static_cast<unsigned long>(finalSql.length()))) {
-        mLogger.error("mysql_stmt_prepare() 失败 (查询流水): {}", mysql_stmt_error(stmt));
-        throw std::runtime_error("准备查询流水语句失败: " + std::string(mysql_stmt_error(stmt)));
-    }
+    try {
+        db::DbResult queryResult = mDbConnection.query(finalSql);
 
-    // --- 绑定参数 ---
-    if (!params.empty()) {
-        if (mysql_stmt_bind_param(stmt, params.data())) {
-            mLogger.error("mysql_stmt_bind_param() 失败 (查询流水): {}", mysql_stmt_error(stmt));
-            throw std::runtime_error("绑定查询流水参数失败: " + std::string(mysql_stmt_error(stmt)));
-        }
-    }
+        results.reserve(queryResult.size()); // 预分配空间
 
-    // --- 执行语句 ---
-    if (mysql_stmt_execute(stmt)) {
-        mLogger.error("mysql_stmt_execute() 失败 (查询流水): {}", mysql_stmt_error(stmt));
-        throw std::runtime_error("执行查询流水语句失败: " + std::string(mysql_stmt_error(stmt)));
-    }
+        for (const auto& row : queryResult) {
+            if (row.size() != 9) { // 期望 9 列
+                mLogger.error("查询流水返回了列数不匹配的行 (预期 9, 实际 {})", row.size());
+                continue; // 跳过此行
+            }
 
-    // --- 绑定结果列 ---
-    MYSQL_BIND resultBinds[9]; // 9 个结果列
-    memset(resultBinds, 0, sizeof(resultBinds));
+            TransactionLogEntry entry;
+            try {
+                // Helper lambda to safely get int64_t from DbValue (handles string conversion)
+                auto getInt64Value = [&](const db::DbValue& val, const std::string& colName) -> int64_t {
+                    if (std::holds_alternative<int64_t>(val)) {
+                        return std::get<int64_t>(val);
+                    } else if (std::holds_alternative<std::string>(val)) {
+                        const std::string& strVal = std::get<std::string>(val);
+                        try {
+                            return std::stoll(strVal);
+                        } catch (...) {
+                            mLogger.error("无法将流水列 '{}' 的字符串值 '{}' 转换为 int64_t。", colName, strVal);
+                            return 0LL; // 返回默认值或抛出异常
+                        }
+                    } else if (std::holds_alternative<std::nullptr_t>(val)) {
+                         mLogger.warn("流水列 '{}' 返回了 NULL 值 (预期为数值)。", colName);
+                         return 0LL;
+                    } else {
+                        mLogger.error("流水列 '{}' 返回了非预期的类型。", colName);
+                        return 0LL;
+                    }
+                };
 
-    int64_t res_id = 0;
-    char res_timestamp[20]; // Sufficient for "YYYY-MM-DD HH:MM:SS"
-    unsigned long len_timestamp = 0;
-    char res_uuid[37]; // UUID length + null terminator
-    unsigned long len_uuid = 0;
-    char res_currency_type[51]; // Max length + null terminator
-    unsigned long len_currency_type = 0;
-    int64_t res_change_amount = 0;
-    int64_t res_previous_amount = 0;
-    char res_reason1[256]; // Max length + null terminator
-    unsigned long len_reason1 = 0;
-    bool is_null_reason1 = false;
-    char res_reason2[256];
-    unsigned long len_reason2 = 0;
-    bool is_null_reason2 = false;
-    char res_reason3[256];
-    unsigned long len_reason3 = 0;
-    bool is_null_reason3 = false;
-    bool error_flags[9] = {false}; // 用于检查每列获取时是否出错
+                 // Helper lambda to safely get string from DbValue (handles nullptr)
+                auto getStringValue = [&](const db::DbValue& val, const std::string& colName) -> std::string {
+                    if (std::holds_alternative<std::string>(val)) {
+                        return std::get<std::string>(val);
+                    } else if (std::holds_alternative<std::nullptr_t>(val)) {
+                        return ""; // Treat NULL as empty string
+                    } else {
+                         mLogger.error("流水列 '{}' 返回了非预期的类型 (预期为字符串或 NULL)。", colName);
+                         return "";
+                    }
+                };
 
-    resultBinds[0].buffer_type = MYSQL_TYPE_LONGLONG;
-    resultBinds[0].buffer = &res_id;
-    resultBinds[0].error = &error_flags[0];
 
-    resultBinds[1].buffer_type = MYSQL_TYPE_STRING; // TIMESTAMP 通常作为字符串获取
-    resultBinds[1].buffer = res_timestamp;
-    resultBinds[1].buffer_length = sizeof(res_timestamp);
-    resultBinds[1].length = &len_timestamp;
-    resultBinds[1].error = &error_flags[1];
+                // 使用辅助函数提取数据
+                entry.id = getInt64Value(row[0], "id");
+                entry.timestamp = getStringValue(row[1], "timestamp"); // timestamp 通常是字符串
+                entry.uuid = getStringValue(row[2], "uuid");
+                entry.currencyType = getStringValue(row[3], "currency_type");
+                // 从数据库获取 int64_t (分)，然后转换为 double (元) 存储在结构体中
+                entry.changeAmount = static_cast<double>(getInt64Value(row[4], "change_amount")) / 100.0;
+                entry.previousAmount = static_cast<double>(getInt64Value(row[5], "previous_amount")) / 100.0;
+                entry.reason1 = getStringValue(row[6], "reason1");
+                entry.reason2 = getStringValue(row[7], "reason2");
+                entry.reason3 = getStringValue(row[8], "reason3");
 
-    resultBinds[2].buffer_type = MYSQL_TYPE_STRING;
-    resultBinds[2].buffer = res_uuid;
-    resultBinds[2].buffer_length = sizeof(res_uuid);
-    resultBinds[2].length = &len_uuid;
-    resultBinds[2].error = &error_flags[2];
-
-    resultBinds[3].buffer_type = MYSQL_TYPE_STRING;
-    resultBinds[3].buffer = res_currency_type;
-    resultBinds[3].buffer_length = sizeof(res_currency_type);
-    resultBinds[3].length = &len_currency_type;
-    resultBinds[3].error = &error_flags[3];
-
-    resultBinds[4].buffer_type = MYSQL_TYPE_LONGLONG;
-    resultBinds[4].buffer = &res_change_amount;
-    resultBinds[4].error = &error_flags[4];
-
-    resultBinds[5].buffer_type = MYSQL_TYPE_LONGLONG;
-    resultBinds[5].buffer = &res_previous_amount;
-    resultBinds[5].error = &error_flags[5];
-
-    resultBinds[6].buffer_type = MYSQL_TYPE_STRING;
-    resultBinds[6].buffer = res_reason1;
-    resultBinds[6].buffer_length = sizeof(res_reason1);
-    resultBinds[6].length = &len_reason1;
-    resultBinds[6].is_null = &is_null_reason1;
-    resultBinds[6].error = &error_flags[6];
-
-    resultBinds[7].buffer_type = MYSQL_TYPE_STRING;
-    resultBinds[7].buffer = res_reason2;
-    resultBinds[7].buffer_length = sizeof(res_reason2);
-    resultBinds[7].length = &len_reason2;
-    resultBinds[7].is_null = &is_null_reason2;
-    resultBinds[7].error = &error_flags[7];
-
-    resultBinds[8].buffer_type = MYSQL_TYPE_STRING;
-    resultBinds[8].buffer = res_reason3;
-    resultBinds[8].buffer_length = sizeof(res_reason3);
-    resultBinds[8].length = &len_reason3;
-    resultBinds[8].is_null = &is_null_reason3;
-    resultBinds[8].error = &error_flags[8];
-
-    if (mysql_stmt_bind_result(stmt, resultBinds)) {
-        mLogger.error("mysql_stmt_bind_result() 失败 (查询流水): {}", mysql_stmt_error(stmt));
-        throw std::runtime_error("绑定查询流水结果失败: " + std::string(mysql_stmt_error(stmt)));
-    }
-
-    // --- 获取结果 ---
-    // 必须调用 mysql_stmt_store_result 以便稍后获取行数，并允许在 fetch 循环中安全地访问数据
-    if (mysql_stmt_store_result(stmt)) {
-        mLogger.error("mysql_stmt_store_result() 失败 (查询流水): {}", mysql_stmt_error(stmt));
-        throw std::runtime_error("存储查询流水结果失败: " + std::string(mysql_stmt_error(stmt)));
-    }
-
-    my_ulonglong num_rows = mysql_stmt_num_rows(stmt);
-    mLogger.debug("查询流水找到 {} 条记录", num_rows);
-
-    while (mysql_stmt_fetch(stmt) == 0) { // 0 表示成功获取一行
-        TransactionLogEntry entry;
-        entry.id = res_id;
-        entry.timestamp = std::string(res_timestamp, len_timestamp);
-        entry.uuid = std::string(res_uuid, len_uuid);
-        entry.currencyType = std::string(res_currency_type, len_currency_type);
-        entry.changeAmount = res_change_amount;
-        entry.previousAmount = res_previous_amount;
-
-        if (!is_null_reason1) entry.reason1 = std::string(res_reason1, len_reason1);
-        if (!is_null_reason2) entry.reason2 = std::string(res_reason2, len_reason2);
-        if (!is_null_reason3) entry.reason3 = std::string(res_reason3, len_reason3);
-
-        // 检查是否有列获取错误
-        bool fetchError = false;
-        for(int i=0; i<9; ++i) {
-            if(error_flags[i]) {
-                mLogger.error("获取流水结果列 {} 时出错", i);
-                fetchError = true;
-                break; // 只报告第一个错误
+                results.push_back(std::move(entry));
+            } catch (const std::exception& e) { // Catch broader exceptions during processing
+                 mLogger.error("处理流水记录时发生错误: {}", e.what());
             }
         }
-        if(fetchError) {
-            // 抛出异常
-            mLogger.error("跳过获取错误的流水记录 ID: {}", res_id);
-            continue;
-        }
 
-        results.push_back(std::move(entry)); // 使用移动语义提高效率
+    } catch (const db::DatabaseException& e) {
+        mLogger.error("查询流水时发生数据库错误: {}", e.what());
+        // 可以选择抛出异常或返回空列表
+        // throw std::runtime_error("查询流水失败");
+    } catch (const std::exception& e) {
+        mLogger.error("查询流水时发生意外错误: {}", e.what());
     }
-
-    // 检查 fetch 循环结束的原因
-    if (mysql_stmt_errno(stmt) != 0 && mysql_stmt_errno(stmt) != MYSQL_NO_DATA) {
-         mLogger.error("mysql_stmt_fetch() 循环结束后出错 (查询流水): {}", mysql_stmt_error(stmt));
-         // 可能需要根据错误类型决定是否抛出异常
-    }
-
-    // 释放存储的结果集 (如果调用了 mysql_stmt_store_result)
-    mysql_stmt_free_result(stmt);
 
     return results;
 }

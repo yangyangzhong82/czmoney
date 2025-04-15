@@ -50,66 +50,81 @@ bool MyMod::load() {
 
 // 插件启用时的逻辑
 bool MyMod::enable() {
-    auto& logger = getSelf().getLogger(); // 获取 Logger 实例
-    logger.debug("Enabling..."); // 输出调试信息
+    auto& logger = getSelf().getLogger();
+    logger.debug("Enabling...");
 
     // --- 数据库连接 ---
     try {
-        // 使用 getConfig() 获取已加载或默认的配置
         const auto& cfg = getConfig();
-        // 记录数据库连接信息（注意：密码不应记录）
-        logger.info("Database configuration: host={}, user={}, db={}, port={}",
-                    cfg.db_host, cfg.db_user, cfg.db_name, cfg.db_port);
+        logger.info("Selected database type: {}", cfg.db_type);
 
-        // 创建 MySQLConnection 实例
-        mDbConnection = std::make_unique<db::MySQLConnection>(
-            cfg.db_host,
-            cfg.db_user,
-            cfg.db_password, 
-            cfg.db_name,
-            cfg.db_port
-        );
+        if (cfg.db_type == "mysql") {
+            logger.info("Using MySQL database: host={}, user={}, db={}, port={}",
+                        cfg.db_host, cfg.db_user, cfg.db_name, cfg.db_port);
+            // 创建 MySQLConnection 实例
+            mDbConnection = std::make_unique<db::MySQLConnection>(
+                cfg.db_host,
+                cfg.db_user,
+                cfg.db_password,
+                cfg.db_name,
+                cfg.db_port
+            );
+        } else if (cfg.db_type == "sqlite") {
+            // 获取插件数据目录的绝对路径
+            std::filesystem::path dataPath = getSelf().getDataDir();
+            // 拼接 SQLite 文件路径
+            std::filesystem::path sqlitePath = dataPath / cfg.db_sqlite_path;
+             // 确保目录存在
+            std::filesystem::create_directories(sqlitePath.parent_path());
+            logger.info("Using SQLite database at path: {}", sqlitePath.string());
+            // 创建 SQLiteConnection 实例
+            mDbConnection = std::make_unique<db::SQLiteConnection>(sqlitePath.string());
+        } else {
+            logger.error("Unsupported database type configured: {}", cfg.db_type);
+            return false;
+        }
 
-        logger.info("Connecting to database..."); // 记录尝试连接数据库
-        if (mDbConnection->connect()) { // 尝试连接
-            logger.info("Database connection successful!"); // 连接成功
+        logger.info("Connecting to database...");
+        if (mDbConnection->connect()) {
+            logger.info("Database connection successful!");
 
             // --- 初始化 MoneyManager ---
-            // 创建 MoneyManager 实例，传入数据库连接和配置对象
-            mMoneyManager = std::make_unique<MoneyManager>(*mDbConnection, getConfig()); // 传递配置
-            logger.info("Initializing money database table..."); // 记录初始化数据表
-            if (mMoneyManager->initializeTable()) { // 初始化数据库表
-                logger.info("Money database table initialized successfully."); // 初始化成功
+            mMoneyManager = std::make_unique<MoneyManager>(*mDbConnection, getConfig());
+            logger.info("Initializing money database table...");
+            if (mMoneyManager->initializeTable()) {
+                logger.info("Money database table initialized successfully.");
 
                 // --- 注册命令 ---
                 logger.info("Registering money commands...");
-                // 从配置中获取别名列表并传递给注册函数
                 registerMoneyCommands(getConfig().commandAliases);
                 logger.info("Money commands registered.");
                 // --- 命令注册结束 ---
 
             } else {
-                logger.error("Failed to initialize money database table!"); // 初始化失败
-                // 初始化失败，阻止插件启用
-                mDbConnection->disconnect(); // 断开数据库连接
-                mDbConnection.reset();       // 释放数据库连接对象
-                mMoneyManager.reset();       // 释放 MoneyManager 对象
-                return false;                // 启用失败
+                logger.error("Failed to initialize money database table!");
+                mDbConnection->disconnect();
+                mDbConnection.reset();
+                mMoneyManager.reset();
+                return false;
             }
             // --- MoneyManager 初始化结束 ---
 
         } else {
-            logger.error("Database connection failed!"); // 连接失败
-            // 阻止插件启用
-             return false;
+            logger.error("Database connection failed!");
+            mDbConnection.reset(); // 释放连接对象
+            return false;
         }
-    } catch (const db::MySQLException& e) {
-        // 捕获数据库特定异常
-        logger.error("Database error during connection: {}", e.what());
-        return false; // 连接失败，阻止启用
+    } catch (const db::DatabaseException& e) { // 捕获通用的数据库异常
+        logger.error("Database error during initialization: {}", e.what());
+        if (mDbConnection) mDbConnection->disconnect(); // 尝试断开连接
+        mDbConnection.reset();
+        mMoneyManager.reset();
+        return false;
     } catch (const std::exception& e) {
-        // 捕获其他标准异常
-        logger.error("An unexpected error occurred during database connection: {}", e.what());
+        logger.error("An unexpected error occurred during initialization: {}", e.what());
+         if (mDbConnection) mDbConnection->disconnect(); // 尝试断开连接
+        mDbConnection.reset();
+        mMoneyManager.reset();
         return false;
     }
     // --- 数据库连接结束 ---
