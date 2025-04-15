@@ -905,6 +905,161 @@ std::optional<int64_t> MoneyManager::parseBalance(const std::string& formattedAm
     }
 }
 
+// --- 新增：转账实现 ---
+bool MoneyManager::transferBalance(
+    const std::string& senderUuid,
+    const std::string& receiverUuid,
+    const std::string& currencyType,
+    int64_t            amountToTransfer,
+    const std::string& reason1, // 默认 "Transfer"
+    const std::string& reason2, // 可用于记录发送者名称 (From)
+    const std::string& reason3  // 可用于记录接收者名称 (To)
+) {
+    // 0. 基础检查
+    auto currencyConfigIt = mConfig.economy.find(currencyType);
+    if (currencyConfigIt == mConfig.economy.end()) {
+         mLogger.error("转账失败：货币类型 '{}' 未在配置中找到。", currencyType);
+         return false;
+    }
+    const auto& currencyConf = currencyConfigIt->second; // 获取当前货币的配置
+
+    // 检查是否允许转账 (虽然命令层也检查了，但核心逻辑层再检查一次更安全)
+    // 注意：API 调用可能绕过命令层检查，所以这里检查是必要的
+    if (!currencyConf.allowTransfer) {
+        mLogger.error("转账失败：货币类型 '{}' 配置为不允许转账。", currencyType);
+        return false;
+    }
+
+    if (amountToTransfer <= 0) {
+        mLogger.warn("尝试转账非正数金额 ({}) 从 {} 到 {}", formatBalance(amountToTransfer), senderUuid, receiverUuid);
+        return false; // 不允许转账非正数
+    }
+    if (senderUuid == receiverUuid) {
+        mLogger.warn("尝试自己给自己转账 (UUID: {})", senderUuid);
+        return false; // 不允许自己转给自己
+    }
+    if (!mDbConnection.isConnected()) {
+        mLogger.error("转账失败：数据库未连接。");
+        return false;
+    }
+
+    // --- 计算税费和实际到账金额 ---
+    double taxRate = currencyConf.transferTaxRate;
+    int64_t taxAmount = 0;
+    int64_t amountReceived = amountToTransfer; // 默认等于转账金额
+
+    if (taxRate > 0.0) { // 只有税率大于 0 才计算
+        if (taxRate < 0.0 || taxRate > 1.0) { // 验证税率范围
+            mLogger.warn("货币类型 '{}' 的转账税率配置无效 ({})，将按 0 处理。", currencyType, taxRate);
+            taxRate = 0.0;
+        }
+
+        // 计算税费 (基于转账金额)，四舍五入到最近的分
+        double taxAmountDouble = static_cast<double>(amountToTransfer) * taxRate;
+        taxAmount = static_cast<int64_t>(std::round(taxAmountDouble));
+
+        // 确保税费不会导致接收金额小于 0 (虽然理论上 amountToTransfer > 0 且 taxRate <= 1.0 不会发生)
+        if (taxAmount > amountToTransfer) {
+             mLogger.warn("计算出的税费 ({}) 大于转账金额 ({})，税费将被调整为转账金额。", formatBalance(taxAmount), formatBalance(amountToTransfer));
+             taxAmount = amountToTransfer;
+        }
+
+        amountReceived = amountToTransfer - taxAmount; // 计算接收者实际收到的金额
+        mLogger.debug("转账税计算: Rate={}, Amount={}, Tax={}, Received={}", taxRate, formatBalance(amountToTransfer), formatBalance(taxAmount), formatBalance(amountReceived));
+    }
+    // --- 税费计算结束 ---
+
+
+    // --- 数据库事务 (理想情况下) ---
+    // 如果 IDatabaseConnection 支持事务，应该在这里开始事务
+    // bool transactionStarted = mDbConnection.beginTransaction();
+    // if (!transactionStarted) {
+    //     mLogger.error("无法开始数据库事务以进行转账。");
+    //     return false;
+    // }
+    // --- 事务结束标记 (用于 try-catch-finally) ---
+    // bool shouldCommit = false;
+
+    try {
+        // 1. 检查发送方余额并尝试扣款
+        // 使用 subtractPlayerBalance，它内部包含余额检查和最低余额检查
+        // 注意：发送方扣除的是 *完整的* 转账金额 amountToTransfer
+        std::string subtractReason1 = reason1; // "Transfer" 或其他基础理由
+        std::string subtractReason2 = fmt::format("To: {}", reason3.empty() ? receiverUuid : reason3); // 收款人
+        std::string subtractReason3 = fmt::format("Amount: {}, Tax: {}", formatBalance(amountToTransfer), formatBalance(taxAmount)); // 记录转账额和税费
+
+        if (!subtractPlayerBalance(senderUuid, currencyType, amountToTransfer, subtractReason1, subtractReason2, subtractReason3)) {
+            // subtractPlayerBalance 失败（余额不足、账户不存在、低于最低值等）
+            // 失败信息已由 subtractPlayerBalance 记录
+            mLogger.warn("转账失败：无法从发送方 {} 扣除 {}", senderUuid, formatBalance(amountToTransfer));
+            // if (transactionStarted) mDbConnection.rollbackTransaction(); // 回滚事务
+            return false;
+        }
+
+        // 2. 尝试给接收方加款
+        // 注意：接收方增加的是扣除税费后的 amountReceived
+        // 如果税率为 0，amountReceived 等于 amountToTransfer
+        std::string addReason1 = reason1; // "Transfer" 或其他基础理由
+        std::string addReason2 = fmt::format("From: {}", reason2.empty() ? senderUuid : reason2); // 付款人
+        std::string addReason3 = fmt::format("Received: {}, Original: {}, Tax: {}", formatBalance(amountReceived), formatBalance(amountToTransfer), formatBalance(taxAmount)); // 记录实收、原额、税费
+
+        // 只有在实际到账金额大于 0 时才尝试加款 (如果税率 100%，则不加款)
+        if (amountReceived > 0) {
+            if (!addPlayerBalance(receiverUuid, currencyType, amountReceived, addReason1, addReason2, addReason3)) {
+                // 加款失败 (例如溢出、数据库错误)
+                mLogger.error("转账严重错误：已从发送方 {} 扣款 {}，但无法为接收方 {} 增加 {}！需要手动干预！",
+                              senderUuid, formatBalance(amountToTransfer), receiverUuid, formatBalance(amountReceived));
+
+                // !!! 关键：尝试回滚扣款操作 !!!
+                // 将完整的 amountToTransfer 退还给发送方
+                mLogger.warn("尝试将款项 {} 退还给发送方 {}...", formatBalance(amountToTransfer), senderUuid);
+                std::string refundReason1 = "Transfer Failed Refund";
+                std::string refundReason2 = fmt::format("Failed transfer to {}", reason3.empty() ? receiverUuid : reason3);
+                std::string refundReason3 = fmt::format("Amount: {}", formatBalance(amountToTransfer));
+                if (!addPlayerBalance(senderUuid, currencyType, amountToTransfer, refundReason1, refundReason2, refundReason3)) {
+                     mLogger.error("无法自动退款 {} 给发送方 {}！数据库状态可能不一致！", formatBalance(amountToTransfer), senderUuid); // 改为 error
+                } else {
+                     mLogger.info("已成功将款项 {} 退还给发送方 {}。", formatBalance(amountToTransfer), senderUuid);
+                }
+
+                // if (transactionStarted) mDbConnection.rollbackTransaction(); // 回滚事务
+                return false; // 转账最终失败
+            }
+            // --- BUG FIX: Removed erroneous return false here ---
+        } else {
+            // 如果税后金额为 0 或负数 (理论上只可能为 0)，记录日志
+            mLogger.info("转账税后接收金额为 0 (或更少)，接收方 {} 余额未增加。税费: {}", receiverUuid, formatBalance(taxAmount));
+        }
+
+        // 3. 如果扣款和加款（如果需要）都成功
+        mLogger.info("成功转账 {} ({}) 从 {} 到 {} (实收: {}, 税: {})",
+                     formatBalance(amountToTransfer), currencyType, senderUuid, receiverUuid,
+                     formatBalance(amountReceived), formatBalance(taxAmount));
+        // shouldCommit = true; // 标记事务可以提交
+        return true;
+
+    } catch (const std::exception& e) {
+        mLogger.error("转账过程中发生意外错误: {}", e.what());
+        // if (transactionStarted) mDbConnection.rollbackTransaction(); // 回滚事务
+        return false;
+    }
+
+    // --- 提交或回滚事务 (理想情况下) ---
+    // if (transactionStarted) {
+    //     if (shouldCommit) {
+    //         if (!mDbConnection.commitTransaction()) {
+    //             mLogger.error("提交转账事务失败！数据库状态可能不一致！");
+    //             // 这里可能需要更复杂的错误处理
+    //             return false; // 或者认为操作已完成但提交失败？
+    //         }
+    //     } else {
+    //         // 如果 shouldCommit 为 false，意味着上面已经调用了 rollback
+    //         // mDbConnection.rollbackTransaction(); // 确保回滚
+    //     }
+    // }
+    // return shouldCommit; // 返回最终操作结果
+}
+
 // --- 查询流水实现 --- - 需要重构
 std::vector<TransactionLogEntry> MoneyManager::queryTransactionLogs(
     const std::optional<std::string>& uuidFilter,
@@ -1060,6 +1215,5 @@ std::vector<TransactionLogEntry> MoneyManager::queryTransactionLogs(
 
     return results;
 }
-
 
 } // namespace czmoney

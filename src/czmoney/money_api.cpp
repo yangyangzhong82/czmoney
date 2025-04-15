@@ -281,4 +281,38 @@ std::vector<czmoney::TransactionLogEntry> queryTransactionLogs(
 }
 
 
+// 实现转账 API
+bool transferBalance(
+    std::string_view senderUuid,
+    std::string_view receiverUuid,
+    std::string_view currencyType,
+    double           amountToTransfer,
+    std::string_view reason1,
+    std::string_view reason2,
+    std::string_view reason3
+) {
+    // 转换并验证金额，要求为正数
+    std::optional<int64_t> amountToTransferInCentsOpt = convertDoubleToInt64(amountToTransfer, true); // true: 要求正数
+    if (!amountToTransferInCentsOpt) {
+        return false; // 转换或验证失败
+    }
+    int64_t amountToTransferInCents = amountToTransferInCentsOpt.value();
+
+    // API 层不再检查 <= 0，交给 convertDoubleToInt64
+
+    if (auto* manager = getMoneyManagerInstance()) {
+        // 注意：将 string_view 转换为 string
+        return manager->transferBalance(
+            std::string(senderUuid),
+            std::string(receiverUuid),
+            std::string(currencyType),
+            amountToTransferInCents,
+            std::string(reason1), // 传递理由
+            std::string(reason2),
+            std::string(reason3)
+        );
+    }
+    return false; // 获取 manager 失败
+}
+
 } // namespace czmoney::api

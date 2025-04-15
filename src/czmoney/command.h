@@ -68,11 +68,31 @@ struct MoneyReduceOfflineArgs {
     ll::command::SoftEnum<CurrencyTypeEnum> currencyType;   // 货币类型 (可选)
 };
 
+// 用于查询自身流水
+struct MoneyLogSelfArgs {
+    ll::command::SoftEnum<CurrencyTypeEnum> currencyType; // 可选的货币类型
+    // 可以考虑添加分页参数
+    // int page = 1;
+    // int count = 10;
+};
+
+// --- 新增：用于转账给在线玩家 ---
+struct MoneyPaySelectorArgs {
+    CommandSelector<Player> target;         // 目标玩家选择器 (收款人)
+    float                   amount;         // 转账金额
+    ll::command::SoftEnum<CurrencyTypeEnum> currencyType;   // 货币类型 (可选)
+};
+
+// --- 新增：用于转账给离线玩家 ---
+struct MoneyPayOfflineArgs {
+    std::string             playerName;     // 目标玩家名称 (收款人)
+    float                   amount;         // 转账金额
+    ll::command::SoftEnum<CurrencyTypeEnum> currencyType;   // 货币类型 (可选)
+};
+
+
 
 // --- 命令注册函数声明 ---
-
-#include <vector> // 包含 vector 头文件
-#include <string> // 包含 string 头文件
 
 /**
  * @brief 注册所有与经济相关的命令

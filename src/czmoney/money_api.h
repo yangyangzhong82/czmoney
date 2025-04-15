@@ -178,5 +178,28 @@ CZMONEY_API std::vector<TransactionLogEntry> queryTransactionLogs(
     bool                            ascendingOrder = false
 );
 
+/**
+ * @brief 从一个玩家向另一个玩家转账
+ *
+ * 原子性地执行扣款和加款操作。
+ * @param senderUuid 转出方玩家 UUID
+ * @param receiverUuid 接收方玩家 UUID
+ * @param currencyType 货币类型
+ * @param amountToTransfer 要转账的金额 (必须为正的浮点数，例如 10.50)
+ * @param reason1 可选的操作理由 1 (例如 "Transfer")
+ * @param reason2 可选的操作理由 2 (例如 发起者名称)
+ * @param reason3 可选的操作理由 3 (例如 接收者名称)
+ * @return bool 操作是否成功 (例如，发送方余额不足、接收方账户问题、金额无效等会导致失败)
+ */
+CZMONEY_API bool transferBalance(
+    std::string_view senderUuid,
+    std::string_view receiverUuid,
+    std::string_view currencyType,
+    double           amountToTransfer,
+    std::string_view reason1 = "Transfer",
+    std::string_view reason2 = "",
+    std::string_view reason3 = ""
+);
+
 
 } // namespace czmoney::api

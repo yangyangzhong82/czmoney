@@ -14,12 +14,18 @@ struct CurrencyConfig {
     double initialBalance = 0.0;
     // 最低余额 (浮点数，例如 0.00 或 -10.00)，默认为 0.0
     double minimumBalance = 0.0;
+    // 是否允许通过 /money pay 命令进行转账
+    bool allowTransfer = true; // 默认为允许
+    // 转账税率 (0.0 到 1.0 之间的小数，例如 0.05 表示 5%)
+    double transferTaxRate = 0.0; // 默认为 0%
 
     // LL::Config 需要一个序列化/反序列化函数
     template <typename Self>
     void serialize(Self& self) {
         self(initialBalance, "initialBalance");
         self(minimumBalance, "minimumBalance");
+        self(allowTransfer, "allowTransfer"); 
+        self(transferTaxRate, "transferTaxRate"); 
     }
 };
 
@@ -44,12 +50,12 @@ struct Config {
     // 键: 货币类型 (例如 "money", "points")
     // 值: 该货币类型的具体配置 (CurrencyConfig)
     std::unordered_map<std::string, CurrencyConfig> economy = {
-        {"money", {100.00, 0.00}}, // 示例：money 的初始值为 100.00, 最低为 0.00
-        {"points", {0.0, 0.0}}     // 示例：points 的初始值为 0.0, 最低为 0.0
+        {"money", {100.00, 0.00, true, 0.05}}, // 示例：money 允许转账，税率 5%
+        {"points", {0.0, 0.0, false, 0.0}}     // 示例：points 不允许转账，税率 0%
     };
 
     // 命令别名设置
-    std::vector<std::string> commandAliases = {"money", "$"}; // 默认别名 (更新为包含 $ 符号)
+    std::vector<std::string> commandAliases = {"cm"}; 
 
 
     // LL::Config 需要一个序列化/反序列化函数
