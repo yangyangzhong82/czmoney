@@ -124,7 +124,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
     auto& moneyCommand = registrar.getOrCreateCommand(
         "czmoney",
         "Manage player balances", // 命令描述
-        CommandPermissionLevel::Any,    // 默认权限级别
+        CommandPermissionLevel::GameDirectors,   
         CommandFlagValue::NotCheat //无需作弊
     );
 
