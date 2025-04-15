@@ -30,7 +30,6 @@ using ll::command::SoftEnum; // 新增 using
 using ll::service::PlayerInfo; // 新增 using
 
 // 辅助函数：获取要操作的货币类型
-// 修改参数类型为 SoftEnum
 std::string getTargetCurrencyType(const SoftEnum<CurrencyTypeEnum>& inputType) {
     // SoftEnum 隐式转换为 std::string，可以直接检查是否为空
     if (!inputType.empty()) {
@@ -161,7 +160,6 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 }
                 // --- End Permission Check ---
                 auto& moneyManager = MyMod::getInstance().getMoneyManager();
-                // 使用修改后的 getTargetCurrencyType
                 std::string currency = getTargetCurrencyType(args.currencyType);
                 auto results = args.target.results(origin); // 解析目标选择器
 
@@ -242,7 +240,6 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 }
                 // --- End Permission Check ---
                 auto& moneyManager = MyMod::getInstance().getMoneyManager();
-                // 使用修改后的 getTargetCurrencyType
                 std::string currency = getTargetCurrencyType(args.currencyType);
                 float inputAmount = args.amount; // Get the float amount
 
@@ -341,7 +338,6 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 }
                 // --- End Permission Check ---
                 auto& moneyManager = MyMod::getInstance().getMoneyManager();
-                // 使用修改后的 getTargetCurrencyType
                 std::string currency = getTargetCurrencyType(args.currencyType);
                 float inputAmount = args.amount; // Get the float amount
 

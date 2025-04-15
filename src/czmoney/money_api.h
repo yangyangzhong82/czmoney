@@ -34,8 +34,8 @@ struct TransactionLogEntry {
     std::string        timestamp; // 使用字符串存储从数据库获取的时间戳
     std::string        uuid;
     std::string        currencyType;
-    int64_t            changeAmount;
-    int64_t            previousAmount;
+    double             changeAmount;  
+    double             previousAmount; 
     std::optional<std::string> reason1; // 使用 optional 处理可能为 NULL 的字段
     std::optional<std::string> reason2;
     std::optional<std::string> reason3;

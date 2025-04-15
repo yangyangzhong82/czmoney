@@ -54,7 +54,7 @@ std::optional<int64_t> convertDoubleToInt64(double amount, bool requirePositive 
     double centsDouble = amount * 100.0;
 
     // 4. 检查转换后的值是否在 int64_t 范围内 (截断前的检查)
-    // 对于截断，我们需要确保值在 [min_int64, max_int64 + 1) 范围内
+    // 对于截断，需要确保值在 [min_int64, max_int64 + 1) 范围内
     // 因为例如 92233720368547758.07 * 100 = 9223372036854775807.0，截断后是 max_int64
     // 而 -92233720368547758.08 * 100 = -9223372036854775808.0，截断后是 min_int64
     const double min_representable = static_cast<double>(std::numeric_limits<int64_t>::min());
@@ -94,13 +94,13 @@ int64_t getPlayerBalanceOrInit(std::string_view uuid, std::string_view currencyT
              try {
                  czmoney::MyMod::getInstance().getSelf().getLogger().error("getPlayerBalanceOrInit API 调用失败: {}", e.what());
              } catch (...) {}
-             return 0LL; // 发生异常时返回 0 (或者可以考虑其他错误值)
+             return 0LL; 
         }
     }
     return 0LL; // 获取 manager 失败时返回 0
 }
 
-// 修改 setPlayerBalance 实现
+// setPlayerBalance 实现
 bool setPlayerBalance(
     std::string_view uuid,
     std::string_view currencyType,
@@ -130,7 +130,7 @@ bool setPlayerBalance(
     return false; // 获取 manager 失败
 }
 
-// 修改 addPlayerBalance 实现
+// addPlayerBalance 实现
 bool addPlayerBalance(
     std::string_view uuid,
     std::string_view currencyType,
@@ -146,7 +146,6 @@ bool addPlayerBalance(
     }
     int64_t amountToAddInCents = amountToAddInCentsOpt.value();
 
-    // API 层不再检查 <= 0，交给 convertDoubleToInt64
 
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
@@ -162,7 +161,7 @@ bool addPlayerBalance(
     return false; // 获取 manager 失败
 }
 
-// 修改 subtractPlayerBalance 实现
+// subtractPlayerBalance 实现
 bool subtractPlayerBalance(
     std::string_view uuid,
     std::string_view currencyType,
@@ -214,7 +213,7 @@ std::optional<int64_t> parseBalance(std::string_view formattedAmount) {
 }
 
 // 实现查询流水 API
-std::vector<TransactionLogEntry> queryTransactionLogs(
+std::vector<czmoney::TransactionLogEntry> queryTransactionLogs( 
     std::optional<std::string_view> uuidFilter,
     std::optional<std::string_view> currencyTypeFilter,
     std::optional<std::string_view> startTimeFilter,
@@ -227,9 +226,6 @@ std::vector<TransactionLogEntry> queryTransactionLogs(
     bool                            ascendingOrder
 ) {
     if (auto* manager = getMoneyManagerInstance()) {
-        // 将 string_view 转换为 string (如果 MoneyManager 接口需要)
-        // 注意：MoneyManager 的 queryTransactionLogs 尚未实现，这里假设其接口
-        // 使用 std::optional<std::string> 作为过滤器类型
         auto convert_sv_opt_to_s_opt = [](const std::optional<std::string_view>& sv_opt) -> std::optional<std::string> {
             if (sv_opt) {
                 return std::string(sv_opt.value());
@@ -238,7 +234,7 @@ std::vector<TransactionLogEntry> queryTransactionLogs(
         };
 
         try {
-            return manager->queryTransactionLogs(
+            auto internalLogs = manager->queryTransactionLogs(
                 convert_sv_opt_to_s_opt(uuidFilter),
                 convert_sv_opt_to_s_opt(currencyTypeFilter),
                 convert_sv_opt_to_s_opt(startTimeFilter),
@@ -250,9 +246,33 @@ std::vector<TransactionLogEntry> queryTransactionLogs(
                 offset,
                 ascendingOrder
             );
+
+            // 2. 将内部日志条目转换为 API 使用的日志条目 (double 金额)
+            std::vector<czmoney::TransactionLogEntry> apiLogs; // 修正：使用 czmoney::TransactionLogEntry
+            apiLogs.reserve(internalLogs.size()); // 预分配空间
+
+            for (const auto& internalEntry : internalLogs) {
+                czmoney::TransactionLogEntry apiEntry; // 修正：使用 czmoney::TransactionLogEntry
+
+                apiEntry.id = internalEntry.id;
+                apiEntry.timestamp = internalEntry.timestamp;
+                apiEntry.uuid = internalEntry.uuid;
+                apiEntry.currencyType = internalEntry.currencyType;
+                // 将 int64_t (分) 转换为 double (元)
+                apiEntry.changeAmount = static_cast<double>(internalEntry.changeAmount) / 100.0;
+                apiEntry.previousAmount = static_cast<double>(internalEntry.previousAmount) / 100.0;
+                apiEntry.reason1 = internalEntry.reason1;
+                apiEntry.reason2 = internalEntry.reason2;
+                apiEntry.reason3 = internalEntry.reason3;
+
+                apiLogs.push_back(std::move(apiEntry)); // 添加到结果列表
+            }
+
+            return apiLogs; // 返回转换后的列表
+
         } catch (const std::exception& e) {
             try {
-                czmoney::MyMod::getInstance().getSelf().getLogger().error("queryTransactionLogs API 调用失败: {}", e.what());
+                 czmoney::MyMod::getInstance().getSelf().getLogger().error("queryTransactionLogs API 调用失败: {}", e.what());
             } catch (...) {}
             return {}; // 返回空向量表示失败
         }
