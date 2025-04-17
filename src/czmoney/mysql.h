@@ -125,8 +125,16 @@ public:
      * @brief 获取数据库类型。
      * @return std::string 返回 "mysql"。
      */
-    std::string getDbType() const override; // 实现接口方法
+    std::string getDbType() const override;
 
+    // --- 事务管理 ---
+    void beginTransaction() override;
+    void commitTransaction() override;
+    void rollbackTransaction() override;
+
+    // --- 预处理语句 ---
+    int executePrepared(const std::string& sql, const DbParams& params) override;
+    DbResult queryPrepared(const std::string& sql, const DbParams& params) override;
 
 private:
     std::string m_host;       // 数据库主机

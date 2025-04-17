@@ -5,6 +5,7 @@
 #include <vector>
 #include <variant> // 用于表示结果中不同的数据类型
 #include <optional> // 用于可选结果
+#include <vector>   // 用于绑定参数
 
 namespace db {
 
@@ -15,9 +16,10 @@ public:
 };
 
 // 定义查询结果的数据类型别名
-using DbValue = std::variant<std::nullptr_t, int64_t, double, std::string>;
-using DbRow = std::vector<DbValue>;
-using DbResult = std::vector<DbRow>;
+using DbValue = std::variant<std::nullptr_t, int64_t, double, std::string>; // 参数和结果值类型
+using DbRow = std::vector<DbValue>;     // 单行结果
+using DbResult = std::vector<DbRow>;    // 多行结果集
+using DbParams = std::vector<DbValue>;  // 用于绑定预处理语句的参数列表
 
 
 /**
@@ -63,17 +65,55 @@ public:
      * @return DbResult 包含查询结果的二维向量。如果查询失败或无结果，可能返回空向量。
      * @throws DatabaseException 执行过程中发生错误时抛出。
      */
-    virtual DbResult query(const std::string& sql) = 0; // 新增 query 方法
+    virtual DbResult query(const std::string& sql) = 0;
 
     /**
      * @brief 获取当前数据库连接的类型。
      * @return std::string 返回数据库类型字符串 (例如 "mysql", "sqlite")。
      */
-    virtual std::string getDbType() const = 0; // 新增 getDbType 方法
+    virtual std::string getDbType() const = 0;
 
-    // 未来可以根据需要添加更多方法，例如：
-    // - 用于处理预处理语句 (prepare, bind, execute)
-    // - 用于事务管理 (beginTransaction, commit, rollback)
+    // --- 事务管理 ---
+
+    /**
+     * @brief 开始一个数据库事务。
+     * @throws DatabaseException 如果开始事务失败。
+     */
+    virtual void beginTransaction() = 0;
+
+    /**
+     * @brief 提交当前事务。
+     * @throws DatabaseException 如果提交事务失败。
+     */
+    virtual void commitTransaction() = 0;
+
+    /**
+     * @brief 回滚当前事务。
+     * @throws DatabaseException 如果回滚事务失败。
+     */
+    virtual void rollbackTransaction() = 0;
+
+    // --- 预处理语句 (Prepared Statements) ---
+    // 注意：这是一个简化的接口，实际实现可能更复杂。
+    // 这里不显式返回句柄，而是假设实现类内部管理。
+
+    /**
+     * @brief 执行一个带参数的、不返回结果集的 SQL 语句 (预处理方式)。
+     * @param sql 带占位符 (?) 的 SQL 语句。
+     * @param params 按顺序绑定的参数列表。
+     * @return 一个整数，通常表示操作影响的行数或成功/失败状态。
+     * @throws DatabaseException 执行过程中发生错误时抛出。
+     */
+    virtual int executePrepared(const std::string& sql, const DbParams& params) = 0;
+
+    /**
+     * @brief 执行一个带参数的、返回结果集的 SQL 查询语句 (预处理方式)。
+     * @param sql 带占位符 (?) 的 SQL 查询语句。
+     * @param params 按顺序绑定的参数列表。
+     * @return DbResult 包含查询结果的二维向量。
+     * @throws DatabaseException 执行过程中发生错误时抛出。
+     */
+    virtual DbResult queryPrepared(const std::string& sql, const DbParams& params) = 0;
 };
 
 } // namespace db

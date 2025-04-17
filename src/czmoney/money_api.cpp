@@ -78,26 +78,43 @@ namespace czmoney::api {
 // --- API 函数实现 ---
 
 std::optional<int64_t> getPlayerBalance(std::string_view uuid, std::string_view currencyType) {
+    auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
+    logger.debug("API::getPlayerBalance called for UUID: {}, Currency: {}", uuid, currencyType);
+
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
-        return manager->getPlayerBalance(std::string(uuid), std::string(currencyType));
+        std::optional<int64_t> balance = manager->getPlayerBalance(std::string(uuid), std::string(currencyType));
+        if (balance) {
+            logger.debug("API::getPlayerBalance success for UUID: {}, Currency: {}. Balance: {}", uuid, currencyType, balance.value());
+        } else {
+            logger.debug("API::getPlayerBalance: Account not found for UUID: {}, Currency: {}", uuid, currencyType);
+        }
+        return balance;
+    } else {
+        logger.error("API::getPlayerBalance failed: Could not get MoneyManager instance.");
+        return std::nullopt; // 获取 manager 失败
     }
-    return std::nullopt; // 获取 manager 失败
 }
 
 int64_t getPlayerBalanceOrInit(std::string_view uuid, std::string_view currencyType) {
+    auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
+    logger.debug("API::getPlayerBalanceOrInit called for UUID: {}, Currency: {}", uuid, currencyType);
+
     if (auto* manager = getMoneyManagerInstance()) {
         try {
             // 注意：将 string_view 转换为 string
-            return manager->getPlayerBalanceOrInit(std::string(uuid), std::string(currencyType));
+            int64_t balance = manager->getPlayerBalanceOrInit(std::string(uuid), std::string(currencyType));
+            logger.debug("API::getPlayerBalanceOrInit success for UUID: {}, Currency: {}. Balance: {}", uuid, currencyType, balance);
+            return balance;
         } catch (const std::exception& e) {
-             try {
-                 czmoney::MyMod::getInstance().getSelf().getLogger().error("getPlayerBalanceOrInit API 调用失败: {}", e.what());
-             } catch (...) {}
-             return 0LL; 
+             // 内部 getPlayerBalanceOrInit 应该已经记录了错误，这里记录 API 层面的失败
+             logger.error("API::getPlayerBalanceOrInit failed for UUID: {}, Currency: {}. Reason: {}", uuid, currencyType, e.what());
+             return 0LL; // 根据函数约定返回 0
         }
+    } else {
+        logger.error("API::getPlayerBalanceOrInit failed: Could not get MoneyManager instance.");
+        return 0LL; // 获取 manager 失败时返回 0
     }
-    return 0LL; // 获取 manager 失败时返回 0
 }
 
 // setPlayerBalance 实现
@@ -109,16 +126,22 @@ bool setPlayerBalance(
     std::string_view reason2,
     std::string_view reason3
 ) {
+    auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
+    logger.debug("API::setPlayerBalance called for UUID: {}, Currency: {}, Amount: {}, Reason1: {}, Reason2: {}, Reason3: {}",
+                 uuid, currencyType, amount, reason1, reason2, reason3);
+
     // 转换并验证金额
     std::optional<int64_t> amountInCentsOpt = convertDoubleToInt64(amount, false); // false: 允许负数
     if (!amountInCentsOpt) {
+        // convertDoubleToInt64 内部已记录具体原因
+        logger.error("API::setPlayerBalance failed for UUID: {}: Invalid amount provided: {}", uuid, amount);
         return false; // 转换或验证失败
     }
     int64_t amountInCents = amountInCentsOpt.value();
 
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
-        return manager->setPlayerBalance(
+        bool success = manager->setPlayerBalance(
             std::string(uuid),
             std::string(currencyType),
             amountInCents,
@@ -126,8 +149,17 @@ bool setPlayerBalance(
             std::string(reason2),
             std::string(reason3)
         );
+        if (success) {
+            logger.debug("API::setPlayerBalance success for UUID: {}, Currency: {}", uuid, currencyType);
+        } else {
+            // MoneyManager 内部应该记录了具体失败原因
+            logger.error("API::setPlayerBalance failed for UUID: {}, Currency: {}. MoneyManager::setPlayerBalance returned false.", uuid, currencyType);
+        }
+        return success;
+    } else {
+        logger.error("API::setPlayerBalance failed: Could not get MoneyManager instance.");
+        return false; // 获取 manager 失败
     }
-    return false; // 获取 manager 失败
 }
 
 // addPlayerBalance 实现
@@ -139,17 +171,29 @@ bool addPlayerBalance(
     std::string_view reason2,
     std::string_view reason3
 ) {
-    // 转换并验证金额，要求为正数
-    std::optional<int64_t> amountToAddInCentsOpt = convertDoubleToInt64(amountToAdd, true); // true: 要求正数
+    try {
+        auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
+        logger.debug("API::addPlayerBalance called for UUID: {}, Currency: {}, AmountToAdd: {}, Reason1: {}, Reason2: {}, Reason3: {}",
+                     uuid, currencyType, amountToAdd, reason1, reason2, reason3);
+
+        // 转换并验证金额，要求为正数
+        std::optional<int64_t> amountToAddInCentsOpt = convertDoubleToInt64(amountToAdd, true); // true: 要求正数
     if (!amountToAddInCentsOpt) {
+        // convertDoubleToInt64 内部已记录具体原因
+        logger.error("API::addPlayerBalance failed for UUID: {}: Invalid amount provided: {}", uuid, amountToAdd);
         return false; // 转换或验证失败
     }
     int64_t amountToAddInCents = amountToAddInCentsOpt.value();
+    // 检查转换后的值是否 > 0 (因为 convertDoubleToInt64 允许 0 并记录警告)
+    if (amountToAddInCents <= 0) {
+        logger.error("API::addPlayerBalance failed for UUID: {}: Amount to add must be positive, got {}", uuid, amountToAdd);
+        return false;
+    }
 
 
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
-        return manager->addPlayerBalance(
+        bool success = manager->addPlayerBalance(
             std::string(uuid),
             std::string(currencyType),
             amountToAddInCents,
@@ -157,8 +201,33 @@ bool addPlayerBalance(
             std::string(reason2),
             std::string(reason3)
         );
+        if (success) {
+            logger.debug("API::addPlayerBalance success for UUID: {}, Currency: {}", uuid, currencyType);
+        } else {
+            // MoneyManager 内部应该记录了具体失败原因
+            logger.error("API::addPlayerBalance failed for UUID: {}, Currency: {}. MoneyManager::addPlayerBalance returned false.", uuid, currencyType);
+        }
+        return success;
+    } else {
+        logger.error("API::addPlayerBalance failed: Could not get MoneyManager instance.");
+        return false; // 获取 manager 失败
+        }
+
+    } catch (const std::exception& e) {
+        // Catch exceptions potentially from getLogger() or other unexpected places
+        fprintf(stderr, "[czmoney API FATAL] Exception in addPlayerBalance: %s\n", e.what());
+        try {
+            // Attempt to log using the instance if possible, otherwise rely on stderr
+            czmoney::MyMod::getInstance().getSelf().getLogger().error("API::addPlayerBalance encountered exception: {}", e.what());
+        } catch (...) {} // Ignore logging errors here
+        return false; // Indicate failure
+    } catch (...) {
+        fprintf(stderr, "[czmoney API FATAL] Unknown exception in addPlayerBalance.\n");
+         try {
+            czmoney::MyMod::getInstance().getSelf().getLogger().error("API::addPlayerBalance encountered unknown exception.");
+        } catch (...) {} // Ignore logging errors here
+        return false; // Indicate failure
     }
-    return false; // 获取 manager 失败
 }
 
 // subtractPlayerBalance 实现
@@ -170,18 +239,27 @@ bool subtractPlayerBalance(
     std::string_view reason2,
     std::string_view reason3
 ) {
+    auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
+    logger.debug("API::subtractPlayerBalance called for UUID: {}, Currency: {}, AmountToSubtract: {}, Reason1: {}, Reason2: {}, Reason3: {}",
+                 uuid, currencyType, amountToSubtract, reason1, reason2, reason3);
+
     // 转换并验证金额，要求为正数
     std::optional<int64_t> amountToSubtractInCentsOpt = convertDoubleToInt64(amountToSubtract, true); // true: 要求正数
      if (!amountToSubtractInCentsOpt) {
+        // convertDoubleToInt64 内部已记录具体原因
+        logger.error("API::subtractPlayerBalance failed for UUID: {}: Invalid amount provided: {}", uuid, amountToSubtract);
         return false; // 转换或验证失败
     }
     int64_t amountToSubtractInCents = amountToSubtractInCentsOpt.value();
-
-    // API 层不再检查 <= 0，交给 convertDoubleToInt64
+    // 检查转换后的值是否 > 0 (因为 convertDoubleToInt64 允许 0 并记录警告)
+    if (amountToSubtractInCents <= 0) {
+        logger.error("API::subtractPlayerBalance failed for UUID: {}: Amount to subtract must be positive, got {}", uuid, amountToSubtract);
+        return false;
+    }
 
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
-        return manager->subtractPlayerBalance(
+        bool success = manager->subtractPlayerBalance(
             std::string(uuid),
             std::string(currencyType),
             amountToSubtractInCents,
@@ -189,31 +267,49 @@ bool subtractPlayerBalance(
             std::string(reason2),
             std::string(reason3)
         );
+         if (success) {
+            logger.debug("API::subtractPlayerBalance success for UUID: {}, Currency: {}", uuid, currencyType);
+        } else {
+            // MoneyManager 内部应该记录了具体失败原因 (如余额不足)
+            logger.error("API::subtractPlayerBalance failed for UUID: {}, Currency: {}. MoneyManager::subtractPlayerBalance returned false.", uuid, currencyType);
+        }
+        return success;
+    } else {
+        logger.error("API::subtractPlayerBalance failed: Could not get MoneyManager instance.");
+        return false; // 获取 manager 失败
     }
-    return false; // 获取 manager 失败
 }
 
 bool hasAccount(std::string_view uuid, std::string_view currencyType) {
+    auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
+    logger.debug("API::hasAccount called for UUID: {}, Currency: {}", uuid, currencyType);
+
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
-        return manager->hasAccount(std::string(uuid), std::string(currencyType));
+        bool exists = manager->hasAccount(std::string(uuid), std::string(currencyType));
+        logger.debug("API::hasAccount result for UUID: {}, Currency: {}: {}", uuid, currencyType, exists);
+        return exists;
+    } else {
+        logger.error("API::hasAccount failed: Could not get MoneyManager instance.");
+        return false; // 获取 manager 失败
     }
-    return false; // 获取 manager 失败
 }
 
 std::string formatBalance(int64_t amount) {
     // 这个函数是静态的，可以直接调用
+    // 可以在 MoneyManager::formatBalance 内部添加日志（如果需要）
     return czmoney::MoneyManager::formatBalance(amount);
 }
 
 std::optional<int64_t> parseBalance(std::string_view formattedAmount) {
     // 这个函数是静态的，可以直接调用
+    // 可以在 MoneyManager::parseBalance 内部添加日志（如果需要）
     // 注意：将 string_view 转换为 string
     return czmoney::MoneyManager::parseBalance(std::string(formattedAmount));
 }
 
 // 实现查询流水 API
-std::vector<czmoney::TransactionLogEntry> queryTransactionLogs( 
+std::vector<czmoney::TransactionLogEntry> queryTransactionLogs(
     std::optional<std::string_view> uuidFilter,
     std::optional<std::string_view> currencyTypeFilter,
     std::optional<std::string_view> startTimeFilter,
@@ -225,6 +321,19 @@ std::vector<czmoney::TransactionLogEntry> queryTransactionLogs(
     size_t                          offset,
     bool                            ascendingOrder
 ) {
+    auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
+    // 日志记录所有过滤器（如果存在）
+    logger.debug("API::queryTransactionLogs called with filters: UUID={}, Currency={}, StartTime={}, EndTime={}, R1={}, R2={}, R3={}, Limit={}, Offset={}, Asc={}",
+                 uuidFilter.has_value() ? uuidFilter.value() : "N/A",
+                 currencyTypeFilter.has_value() ? currencyTypeFilter.value() : "N/A",
+                 startTimeFilter.has_value() ? startTimeFilter.value() : "N/A",
+                 endTimeFilter.has_value() ? endTimeFilter.value() : "N/A",
+                 reason1Filter.has_value() ? reason1Filter.value() : "N/A",
+                 reason2Filter.has_value() ? reason2Filter.value() : "N/A",
+                 reason3Filter.has_value() ? reason3Filter.value() : "N/A",
+                 limit, offset, ascendingOrder);
+
+
     if (auto* manager = getMoneyManagerInstance()) {
         auto convert_sv_opt_to_s_opt = [](const std::optional<std::string_view>& sv_opt) -> std::optional<std::string> {
             if (sv_opt) {
@@ -234,50 +343,46 @@ std::vector<czmoney::TransactionLogEntry> queryTransactionLogs(
         };
 
         try {
+            // 将 string_view 过滤器转换为 string 过滤器
+            auto uuidStrFilter = convert_sv_opt_to_s_opt(uuidFilter);
+            auto currencyStrFilter = convert_sv_opt_to_s_opt(currencyTypeFilter);
+            auto startStrFilter = convert_sv_opt_to_s_opt(startTimeFilter);
+            auto endStrFilter = convert_sv_opt_to_s_opt(endTimeFilter);
+            auto r1StrFilter = convert_sv_opt_to_s_opt(reason1Filter);
+            auto r2StrFilter = convert_sv_opt_to_s_opt(reason2Filter);
+            auto r3StrFilter = convert_sv_opt_to_s_opt(reason3Filter);
+
             auto internalLogs = manager->queryTransactionLogs(
-                convert_sv_opt_to_s_opt(uuidFilter),
-                convert_sv_opt_to_s_opt(currencyTypeFilter),
-                convert_sv_opt_to_s_opt(startTimeFilter),
-                convert_sv_opt_to_s_opt(endTimeFilter),
-                convert_sv_opt_to_s_opt(reason1Filter),
-                convert_sv_opt_to_s_opt(reason2Filter),
-                convert_sv_opt_to_s_opt(reason3Filter),
+                uuidStrFilter,
+                currencyStrFilter,
+                startStrFilter,
+                endStrFilter,
+                r1StrFilter,
+                r2StrFilter,
+                r3StrFilter,
                 limit,
                 offset,
                 ascendingOrder
             );
 
-            // 2. 将内部日志条目转换为 API 使用的日志条目 (double 金额)
-            std::vector<czmoney::TransactionLogEntry> apiLogs; // 修正：使用 czmoney::TransactionLogEntry
-            apiLogs.reserve(internalLogs.size()); // 预分配空间
+            logger.debug("API::queryTransactionLogs: MoneyManager returned {} log entries.", internalLogs.size());
 
-            for (const auto& internalEntry : internalLogs) {
-                czmoney::TransactionLogEntry apiEntry; // 修正：使用 czmoney::TransactionLogEntry
+            // 2. 将内部日志条目转换为 API 使用的日志条目
+            // 假设 money_api.h 中的 TransactionLogEntry 与 money.cpp 内部使用的类型匹配
+            std::vector<czmoney::TransactionLogEntry> apiLogs = internalLogs; // 直接赋值
 
-                apiEntry.id = internalEntry.id;
-                apiEntry.timestamp = internalEntry.timestamp;
-                apiEntry.uuid = internalEntry.uuid;
-                apiEntry.currencyType = internalEntry.currencyType;
-                // 直接传递 int64_t (分)，因为 API 结构体现在也使用 int64_t
-                apiEntry.changeAmount = internalEntry.changeAmount;
-                apiEntry.previousAmount = internalEntry.previousAmount;
-                apiEntry.reason1 = internalEntry.reason1;
-                apiEntry.reason2 = internalEntry.reason2;
-                apiEntry.reason3 = internalEntry.reason3;
-
-                apiLogs.push_back(std::move(apiEntry)); // 添加到结果列表
-            }
-
-            return apiLogs; // 返回转换后的列表
+            logger.debug("API::queryTransactionLogs successfully returned {} entries.", apiLogs.size());
+            return apiLogs; // 返回列表
 
         } catch (const std::exception& e) {
-            try {
-                 czmoney::MyMod::getInstance().getSelf().getLogger().error("queryTransactionLogs API 调用失败: {}", e.what());
-            } catch (...) {}
-            return {}; // 返回空向量表示失败
+             // MoneyManager 内部应该记录了具体错误
+             logger.error("API::queryTransactionLogs failed. Reason: {}", e.what());
+             return {}; // 返回空向量表示失败
         }
+    } else {
+        logger.error("API::queryTransactionLogs failed: Could not get MoneyManager instance.");
+        return {}; // 获取 manager 失败，返回空向量
     }
-    return {}; // 获取 manager 失败，返回空向量
 }
 
 
@@ -291,18 +396,27 @@ bool transferBalance(
     std::string_view reason2,
     std::string_view reason3
 ) {
+    auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
+    logger.debug("API::transferBalance called: Sender={}, Receiver={}, Currency={}, Amount={}, R1={}, R2={}, R3={}",
+                 senderUuid, receiverUuid, currencyType, amountToTransfer, reason1, reason2, reason3);
+
     // 转换并验证金额，要求为正数
     std::optional<int64_t> amountToTransferInCentsOpt = convertDoubleToInt64(amountToTransfer, true); // true: 要求正数
     if (!amountToTransferInCentsOpt) {
+        // convertDoubleToInt64 内部已记录具体原因
+        logger.error("API::transferBalance failed: Invalid amount provided: {}", amountToTransfer);
         return false; // 转换或验证失败
     }
     int64_t amountToTransferInCents = amountToTransferInCentsOpt.value();
-
-    // API 层不再检查 <= 0，交给 convertDoubleToInt64
+    // 检查转换后的值是否 > 0 (因为 convertDoubleToInt64 允许 0 并记录警告)
+    if (amountToTransferInCents <= 0) {
+        logger.error("API::transferBalance failed: Amount to transfer must be positive, got {}", amountToTransfer);
+        return false;
+    }
 
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
-        return manager->transferBalance(
+        bool success = manager->transferBalance(
             std::string(senderUuid),
             std::string(receiverUuid),
             std::string(currencyType),
@@ -311,8 +425,19 @@ bool transferBalance(
             std::string(reason2),
             std::string(reason3)
         );
+        if (success) {
+            logger.debug("API::transferBalance success: Sender={}, Receiver={}, Currency={}, Amount={}",
+                         senderUuid, receiverUuid, currencyType, amountToTransferInCents);
+        } else {
+            // MoneyManager 内部应该记录了具体失败原因 (如余额不足、不允许转账等)
+            logger.error("API::transferBalance failed: Sender={}, Receiver={}, Currency={}, Amount={}. MoneyManager::transferBalance returned false.",
+                         senderUuid, receiverUuid, currencyType, amountToTransferInCents);
+        }
+        return success;
+    } else {
+        logger.error("API::transferBalance failed: Could not get MoneyManager instance.");
+        return false; // 获取 manager 失败
     }
-    return false; // 获取 manager 失败
 }
 
 } // namespace czmoney::api

@@ -254,4 +254,167 @@ std::string SQLiteConnection::getDbType() const {
     return "sqlite";
 }
 
+
+// --- 事务管理实现 ---
+
+void SQLiteConnection::beginTransaction() {
+    // 使用 execute 执行 BEGIN TRANSACTION
+    // execute 内部会检查连接并抛出异常
+    execute("BEGIN TRANSACTION;");
+}
+
+void SQLiteConnection::commitTransaction() {
+    // 使用 execute 执行 COMMIT
+    execute("COMMIT;");
+}
+
+void SQLiteConnection::rollbackTransaction() {
+    // 使用 execute 执行 ROLLBACK
+    execute("ROLLBACK;");
+}
+
+// --- 预处理语句辅助函数 (绑定参数) ---
+// 将 DbValue 绑定到 SQLite 语句的指定索引
+static void bindParameter(sqlite3_stmt* stmt, int index, const DbValue& value) {
+    int rc = SQLITE_OK;
+    std::visit([&](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::nullptr_t>) {
+            rc = sqlite3_bind_null(stmt, index);
+        } else if constexpr (std::is_same_v<T, int64_t>) {
+            rc = sqlite3_bind_int64(stmt, index, arg);
+        } else if constexpr (std::is_same_v<T, double>) {
+            rc = sqlite3_bind_double(stmt, index, arg);
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            // SQLITE_TRANSIENT: SQLite 复制字符串，更安全
+            rc = sqlite3_bind_text(stmt, index, arg.c_str(), -1, SQLITE_TRANSIENT);
+        } else {
+            // 理论上不应发生，因为 DbValue 类型有限
+            throw SQLiteException("Unsupported parameter type encountered during binding", stmt);
+        }
+    }, value);
+
+    if (rc != SQLITE_OK) {
+        throw SQLiteException("Failed to bind parameter at index " + std::to_string(index), stmt);
+    }
+}
+
+// --- 预处理语句实现 ---
+
+int SQLiteConnection::executePrepared(const std::string& sql, const DbParams& params) {
+    if (!isConnected()) {
+        throw SQLiteException("Not connected to SQLite database");
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    // 准备 SQL 语句
+    int rc = sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr);
+    SQLiteStatementGuard stmtGuard(stmt); // RAII 管理
+
+    if (rc != SQLITE_OK) {
+        throw SQLiteException("sqlite3_prepare_v2 failed for SQL: " + sql, m_db);
+    }
+
+    // 检查参数数量是否匹配占位符数量
+    int expectedParams = sqlite3_bind_parameter_count(stmt);
+    if (expectedParams != static_cast<int>(params.size())) {
+        throw SQLiteException("Parameter count mismatch: SQL expects " + std::to_string(expectedParams) +
+                              ", but " + std::to_string(params.size()) + " provided.", stmt);
+    }
+
+
+    // 绑定所有参数
+    for (size_t i = 0; i < params.size(); ++i) {
+        bindParameter(stmt, static_cast<int>(i + 1), params[i]); // 索引从 1 开始
+    }
+
+    // 执行语句
+    rc = sqlite3_step(stmt);
+
+    // 对于 execute (非 query)，期望的结果是 SQLITE_DONE
+    if (rc != SQLITE_DONE) {
+        // 如果不是 DONE，则发生了错误
+        throw SQLiteException("sqlite3_step failed during prepared statement execution", stmt);
+    }
+
+    // 获取受影响的行数 (对于 INSERT, UPDATE, DELETE)
+    int changes = sqlite3_changes(m_db);
+
+    // stmtGuard 会自动调用 sqlite3_finalize
+    return changes; // 返回受影响的行数
+}
+
+
+DbResult SQLiteConnection::queryPrepared(const std::string& sql, const DbParams& params) {
+     if (!isConnected()) {
+        throw SQLiteException("Not connected to SQLite database");
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    // 准备 SQL 语句
+    int rc = sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr);
+    SQLiteStatementGuard stmtGuard(stmt); // RAII 管理
+
+    if (rc != SQLITE_OK) {
+        throw SQLiteException("sqlite3_prepare_v2 failed for SQL: " + sql, m_db);
+    }
+
+    // 检查参数数量
+    int expectedParams = sqlite3_bind_parameter_count(stmt);
+     if (expectedParams != static_cast<int>(params.size())) {
+        throw SQLiteException("Parameter count mismatch: SQL expects " + std::to_string(expectedParams) +
+                              ", but " + std::to_string(params.size()) + " provided.", stmt);
+    }
+
+    // 绑定所有参数
+    for (size_t i = 0; i < params.size(); ++i) {
+        bindParameter(stmt, static_cast<int>(i + 1), params[i]);
+    }
+
+    DbResult result; // 存储查询结果
+
+    // 逐步执行语句并获取行
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        DbRow row;
+        int columnCount = sqlite3_column_count(stmt);
+        row.reserve(columnCount);
+
+        for (int i = 0; i < columnCount; ++i) {
+            int colType = sqlite3_column_type(stmt, i);
+            switch (colType) {
+                case SQLITE_INTEGER:
+                    row.emplace_back(sqlite3_column_int64(stmt, i));
+                    break;
+                case SQLITE_FLOAT:
+                    row.emplace_back(sqlite3_column_double(stmt, i));
+                    break;
+                case SQLITE_TEXT:
+                    row.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(stmt, i)));
+                    break;
+                case SQLITE_BLOB:
+                    // 暂不支持 BLOB，作为空字符串处理或抛异常
+                    row.emplace_back(std::string("[BLOB data]"));
+                    break;
+                case SQLITE_NULL:
+                    row.emplace_back(nullptr);
+                    break;
+                default:
+                    row.emplace_back(std::string("[Unknown data type]"));
+                    break;
+            }
+        }
+        result.push_back(std::move(row));
+    }
+
+    // 检查 sqlite3_step 的最终状态
+    if (rc != SQLITE_DONE) {
+        // 如果不是 SQLITE_DONE，说明执行过程中发生了错误
+        throw SQLiteException("sqlite3_step failed during prepared query execution", stmt);
+    }
+
+    // stmtGuard 会自动调用 sqlite3_finalize
+    return result;
+}
+
+
 } // namespace db
