@@ -15,7 +15,9 @@ const addPlayerBalance = ll.imports("czmoney", "addPlayerBalance");
 // 也可以一次性导入所有函数到一个对象中（如果脚本引擎支持或自行封装）
 const czmoneyAPI = {
     getPlayerBalance: ll.imports("czmoney", "getPlayerBalance"),
+    getRawPlayerBalance: ll.imports("czmoney", "getRawPlayerBalance"), // 新增
     getPlayerBalanceOrInit: ll.imports("czmoney", "getPlayerBalanceOrInit"),
+    getRawPlayerBalanceOrInit: ll.imports("czmoney", "getRawPlayerBalanceOrInit"), // 新增
     setPlayerBalance: ll.imports("czmoney", "setPlayerBalance"),
     addPlayerBalance: ll.imports("czmoney", "addPlayerBalance"),
     subtractPlayerBalance: ll.imports("czmoney", "subtractPlayerBalance"),
@@ -29,9 +31,8 @@ const czmoneyAPI = {
 ## API 函数列表
 
 **重要提示:**
-*   API 函数内部使用 `int64_t` (64位整数) 来存储金额，单位是 **分** (即实际金额乘以 100)，以避免浮点数精度问题。
-*   当 API 函数接受 `Number` 类型的金额参数时，通常指的是 **元** (例如 123.45)。插件内部会自动将其转换为分进行处理。
-*   当 API 函数返回 `Number` 类型的余额时，通常是 **分**。你需要将其除以 100 来得到以元为单位的实际金额。
+*   涉及金额的函数，除非函数名明确指出是 `Raw` (原始) 或参数/返回值描述为 **分**，否则默认单位是 **元** (例如 `123.45`)。
+*   `Raw` 函数或明确说明处理 **分** 的函数，其金额单位是 **分** (即实际金额乘以 100 的整数)。
 
 以下是所有可用的 API 函数及其用法：
 
@@ -39,19 +40,42 @@ const czmoneyAPI = {
 
 ### `getPlayerBalance(uuid, currencyType)`
 
-获取玩家指定货币类型的余额。
+获取玩家指定货币类型的余额 (单位：**元**)。
 
 *   **参数:**
     *   `uuid` (String): 玩家的 UUID。
     *   `currencyType` (String): 货币类型 (例如 "money", "points")。
-*   **返回值:** (Number) 玩家的余额 (整数，**分**)。如果账户不存在或查询失败，返回 0。
+*   **返回值:** (Number) 玩家的余额 (浮点数，**元**)。如果账户不存在或查询失败，返回 `0.0`。请使用 `hasAccount` 区分零余额和无账户的情况。
 
 **示例:**
 ```javascript
 const playerUuid = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx";
-const balanceInCents = czmoneyAPI.getPlayerBalance(playerUuid, "money");
-if (balanceInCents !== 0 || czmoneyAPI.hasAccount(playerUuid, "money")) { // 需要额外判断账户是否存在来区分0余额和无账户
-    logger.info(`玩家 ${playerUuid} 的余额为: ${balanceInCents / 100} 元`); // 除以 100 得到元
+const balanceInYuan = czmoneyAPI.getPlayerBalance(playerUuid, "money");
+if (balanceInYuan !== 0.0 || czmoneyAPI.hasAccount(playerUuid, "money")) { // 需要额外判断账户是否存在
+    logger.info(`玩家 ${playerUuid} 的余额为: ${balanceInYuan} 元`);
+} else {
+    logger.info(`玩家 ${playerUuid} 的 money 账户不存在。`);
+}
+```
+
+---
+
+### `getRawPlayerBalance(uuid, currencyType)`
+
+获取玩家指定货币类型的原始余额 (单位：**分**)。
+
+*   **参数:**
+    *   `uuid` (String): 玩家的 UUID。
+    *   `currencyType` (String): 货币类型 (例如 "money", "points")。
+*   **返回值:** (Number) 玩家的原始余额 (整数，**分**)。如果账户不存在或查询失败，返回 `0`。请使用 `hasAccount` 区分零余额和无账户的情况。
+
+**示例:**
+```javascript
+const playerUuid = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx";
+const balanceInCents = czmoneyAPI.getRawPlayerBalance(playerUuid, "money");
+if (balanceInCents !== 0 || czmoneyAPI.hasAccount(playerUuid, "money")) { // 需要额外判断账户是否存在
+    logger.info(`玩家 ${playerUuid} 的原始余额为: ${balanceInCents} 分`);
+    logger.info(`即: ${czmoneyAPI.formatBalance(balanceInCents)} 元`); // 可以用 formatBalance 转换显示
 } else {
     logger.info(`玩家 ${playerUuid} 的 money 账户不存在。`);
 }
@@ -61,18 +85,37 @@ if (balanceInCents !== 0 || czmoneyAPI.hasAccount(playerUuid, "money")) { // 需
 
 ### `getPlayerBalanceOrInit(uuid, currencyType)`
 
-获取玩家指定货币类型的余额，如果账户不存在则根据配置初始化。
+获取玩家指定货币类型的余额 (单位：**元**)，如果账户不存在则根据配置初始化。
 
 *   **参数:**
     *   `uuid` (String): 玩家的 UUID。
     *   `currencyType` (String): 货币类型。
-*   **返回值:** (Number) 玩家的余额 (整数，**分**)。
+*   **返回值:** (Number) 玩家的余额 (浮点数，**元**)。如果初始化失败，可能返回 `0.0`。
 
 **示例:**
 ```javascript
 const playerUuid = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx";
-const balanceInCents = czmoneyAPI.getPlayerBalanceOrInit(playerUuid, "money");
-logger.info(`玩家 ${playerUuid} 的余额 (或初始余额) 为: ${balanceInCents / 100} 元`);
+const balanceInYuan = czmoneyAPI.getPlayerBalanceOrInit(playerUuid, "money");
+logger.info(`玩家 ${playerUuid} 的余额 (或初始余额) 为: ${balanceInYuan} 元`);
+```
+
+---
+
+### `getRawPlayerBalanceOrInit(uuid, currencyType)`
+
+获取玩家指定货币类型的原始余额 (单位：**分**)，如果账户不存在则根据配置初始化。
+
+*   **参数:**
+    *   `uuid` (String): 玩家的 UUID。
+    *   `currencyType` (String): 货币类型。
+*   **返回值:** (Number) 玩家的原始余额 (整数，**分**)。如果初始化失败，可能返回 `0`。
+
+**示例:**
+```javascript
+const playerUuid = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx";
+const balanceInCents = czmoneyAPI.getRawPlayerBalanceOrInit(playerUuid, "money");
+logger.info(`玩家 ${playerUuid} 的原始余额 (或初始余额) 为: ${balanceInCents} 分`);
+logger.info(`即: ${czmoneyAPI.formatBalance(balanceInCents)} 元`);
 ```
 
 ---
@@ -84,7 +127,7 @@ logger.info(`玩家 ${playerUuid} 的余额 (或初始余额) 为: ${balanceInCe
 *   **参数:**
     *   `uuid` (String): 玩家的 UUID。
     *   `currencyType` (String): 货币类型。
-    *   `amount` (Number): 要设置的余额 (**元**，例如 123.45)。
+    *   `amount` (Number): 要设置的余额 (**元**，浮点数，例如 `123.45`)。
     *   `reason1` (String, 可选): 操作理由 1。
     *   `reason2` (String, 可选): 操作理由 2。
     *   `reason3` (String, 可选): 操作理由 3。
@@ -110,7 +153,7 @@ if (success) {
 *   **参数:**
     *   `uuid` (String): 玩家的 UUID。
     *   `currencyType` (String): 货币类型。
-    *   `amountToAdd` (Number): 要增加的金额 (**元**，必须为正数，例如 10.50)。
+    *   `amountToAdd` (Number): 要增加的金额 (**元**，必须为正数，例如 `10.50`)。
     *   `reason1` (String, 可选): 操作理由 1。
     *   `reason2` (String, 可选): 操作理由 2。
     *   `reason3` (String, 可选): 操作理由 3。
@@ -136,7 +179,7 @@ if (success) {
 *   **参数:**
     *   `uuid` (String): 玩家的 UUID。
     *   `currencyType` (String): 货币类型。
-    *   `amountToSubtract` (Number): 要减少的金额 (**元**，必须为正数，例如 5.25)。
+    *   `amountToSubtract` (Number): 要减少的金额 (**元**，必须为正数，例如 `5.25`)。
     *   `reason1` (String, 可选): 操作理由 1。
     *   `reason2` (String, 可选): 操作理由 2。
     *   `reason3` (String, 可选): 操作理由 3。
@@ -182,7 +225,7 @@ if (czmoneyAPI.hasAccount(playerUuid, "money")) {
 
 *   **参数:**
     *   `amount` (Number): 整数余额 (**分**)。
-*   **返回值:** (String) 格式化后的金额字符串 (例如 "123.45")。
+*   **返回值:** (String) 格式化后的金额字符串 (例如 `"123.45"`)。
 
 **示例:**
 ```javascript
@@ -190,8 +233,8 @@ const balanceInCents = 12345;
 const formattedString = czmoneyAPI.formatBalance(balanceInCents); // "123.45"
 logger.info(`格式化后的金额: ${formattedString}`);
 
-const balanceFromAPI = czmoneyAPI.getPlayerBalance("some_uuid", "money");
-logger.info(`格式化后的余额: ${czmoneyAPI.formatBalance(balanceFromAPI)}`);
+const rawBalanceFromAPI = czmoneyAPI.getRawPlayerBalance("some_uuid", "money");
+logger.info(`格式化后的余额: ${czmoneyAPI.formatBalance(rawBalanceFromAPI)}`);
 ```
 
 ---
@@ -201,8 +244,8 @@ logger.info(`格式化后的余额: ${czmoneyAPI.formatBalance(balanceFromAPI)}`
 将带小数的字符串金额 (**元**) 解析为整数余额 (**分**)。
 
 *   **参数:**
-    *   `formattedAmount` (String): 格式化的金额字符串 (**元**，例如 "123.45", "0.5", "100")。
-*   **返回值:** (Number) 整数余额 (**分**)。如果格式无效，返回 0。
+    *   `formattedAmount` (String): 格式化的金额字符串 (**元**，例如 `"123.45"`, `"0.5"`, `"100"`)。
+*   **返回值:** (Number) 整数余额 (**分**)。如果格式无效，返回 `0`。
 
 **示例:**
 ```javascript
@@ -230,8 +273,8 @@ logger.info(`解析无效字符串后的金额 (分): ${invalidCents}`);
     *   `senderUuid` (String): 转出方玩家 UUID。
     *   `receiverUuid` (String): 接收方玩家 UUID。
     *   `currencyType` (String): 货币类型。
-    *   `amountToTransfer` (Number): 要转账的金额 (**元**，必须为正数，例如 10.50)。这是发送方扣除的金额，接收方收到的金额会减去税费。
-    *   `reason1` (String, 可选): 操作理由 1 (默认为 "Transfer")。
+    *   `amountToTransfer` (Number): 要转账的金额 (**元**，必须为正数，例如 `10.50`)。这是发送方扣除的金额，接收方收到的金额会减去税费。
+    *   `reason1` (String, 可选): 操作理由 1 (默认为 `"Transfer"`)。
     *   `reason2` (String, 可选): 操作理由 2 (例如 发起者名称)。
     *   `reason3` (String, 可选): 操作理由 3 (例如 接收者名称)。
 *   **返回值:** (Boolean) 操作是否成功 (例如发送方余额不足、配置不允许转账等会导致失败)。
