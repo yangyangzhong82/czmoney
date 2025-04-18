@@ -4,6 +4,8 @@
 #include "ll/api/Config.h"
 #include "czmoney/money.h"
 #include "czmoney/command.h" // 包含 command.h
+#include <RemoteCallAPI.h>
+#include "czmoney/money_api.h"
 #include <stdexcept>
 #include <filesystem>
 #include <stdexcept>
@@ -98,6 +100,94 @@ bool MyMod::enable() {
                 logger.info("Registering money commands...");
                 registerMoneyCommands(getConfig().commandAliases);
                 logger.info("Money commands registered.");
+                // --- 脚本 API 导出开始 ---
+                logger.info("Registering script API functions...");
+                RemoteCall::exportAs("czmoney", "getPlayerBalance",
+                    std::function<double(std::string, std::string)>(
+                        [](std::string uuid, std::string currencyType) -> double {
+                            auto opt = ::czmoney::api::getPlayerBalance(uuid, currencyType);
+                            return opt.has_value() ? opt.value() : 0.0;
+                        }
+                    )
+                );
+                RemoteCall::exportAs("czmoney", "getRawPlayerBalance",
+                    std::function<int64_t(std::string, std::string)>(
+                        [](std::string uuid, std::string currencyType) -> int64_t {
+                            auto opt = ::czmoney::api::getRawPlayerBalance(uuid, currencyType);
+                            return opt.has_value() ? opt.value() : 0LL;
+                        }
+                    )
+                );
+                RemoteCall::exportAs("czmoney", "getPlayerBalanceOrInit",
+                    std::function<double(std::string, std::string)>(
+                        [](std::string uuid, std::string currencyType) -> double {
+                            return ::czmoney::api::getPlayerBalanceOrInit(uuid, currencyType);
+                        }
+                    )
+                );
+                RemoteCall::exportAs("czmoney", "getRawPlayerBalanceOrInit",
+                    std::function<int64_t(std::string, std::string)>(
+                        [](std::string uuid, std::string currencyType) -> int64_t {
+                            return ::czmoney::api::getRawPlayerBalanceOrInit(uuid, currencyType);
+                        }
+                    )
+                );
+                RemoteCall::exportAs("czmoney", "setPlayerBalance",
+                    std::function<bool(std::string, std::string, double, std::string, std::string, std::string)>(
+                        [](std::string uuid, std::string currencyType, double amount,
+                           std::string r1, std::string r2, std::string r3) -> bool {
+                            return ::czmoney::api::setPlayerBalance(uuid, currencyType, amount, r1, r2, r3);
+                        }
+                    )
+                );
+                RemoteCall::exportAs("czmoney", "addPlayerBalance",
+                    std::function<bool(std::string, std::string, double, std::string, std::string, std::string)>(
+                        [](std::string uuid, std::string currencyType, double amount,
+                           std::string r1, std::string r2, std::string r3) -> bool {
+                            return ::czmoney::api::addPlayerBalance(uuid, currencyType, amount, r1, r2, r3);
+                        }
+                    )
+                );
+                RemoteCall::exportAs("czmoney", "subtractPlayerBalance",
+                    std::function<bool(std::string, std::string, double, std::string, std::string, std::string)>(
+                        [](std::string uuid, std::string currencyType, double amount,
+                           std::string r1, std::string r2, std::string r3) -> bool {
+                            return ::czmoney::api::subtractPlayerBalance(uuid, currencyType, amount, r1, r2, r3);
+                        }
+                    )
+                );
+                RemoteCall::exportAs("czmoney", "hasAccount",
+                    std::function<bool(std::string, std::string)>(
+                        [](std::string uuid, std::string currencyType) -> bool {
+                            return ::czmoney::api::hasAccount(uuid, currencyType);
+                        }
+                    )
+                );
+                RemoteCall::exportAs("czmoney", "formatBalance",
+                    std::function<std::string(int64_t)>(
+                        [](int64_t amount) -> std::string {
+                            return ::czmoney::api::formatBalance(amount);
+                        }
+                    )
+                );
+                RemoteCall::exportAs("czmoney", "parseBalance",
+                    std::function<int64_t(std::string)>(
+                        [](std::string s) -> int64_t {
+                            auto opt = ::czmoney::api::parseBalance(s);
+                            return opt.has_value() ? opt.value() : 0LL;
+                        }
+                    )
+                );
+                RemoteCall::exportAs("czmoney", "transferBalance",
+                    std::function<bool(std::string, std::string, std::string, double, std::string, std::string, std::string)>(
+                        [](std::string sender, std::string receiver, std::string currencyType, double amount,
+                           std::string r1, std::string r2, std::string r3) -> bool {
+                            return ::czmoney::api::transferBalance(sender, receiver, currencyType, amount, r1, r2, r3);
+                        }
+                    )
+                );
+                logger.info("Script API functions registered.");
+                // --- 脚本 API 导出结束 ---
                 // --- 命令注册结束 ---
 
             } else {

@@ -566,22 +566,76 @@ bool czmoney::MoneyManager::addPlayerBalance(
         const std::string sql = "UPDATE player_balances SET amount = ? WHERE uuid = ? AND currency_type = ?;";
         db::DbParams params = {newBalance, uuid, currencyType};
 
-        mLogger.debug("Executing prepared SQL for addPlayerBalance: {} with params: [{}, {}, {}]",
-                      sql, newBalance, uuid, currencyType);
+        // --- 增强日志 ---
+        mLogger.debug("Preparing to execute SQL for addPlayerBalance:");
+        mLogger.debug("  SQL: {}", sql);
+        mLogger.debug("  Params: [NewBalance={}, UUID={}, Currency={}]", newBalance, uuid, currencyType);
+        // --- 增强日志结束 ---
 
         // 5. 执行更新
-        int affectedRows = mDbConnection.executePrepared(sql, params);
+        int affectedRows = -1; // 初始化为无效值
+        try {
+            // --- MORE LOGGING ---
+            // fprintf(stderr, "[czmoney DEBUG] Attempting DB update in addPlayerBalance...\n"); // Removed fprintf
+            mLogger.debug("Attempting DB update in addPlayerBalance..."); // Also log via logger
+            // --- END MORE LOGGING ---
 
+            affectedRows = mDbConnection.executePrepared(sql, params);
+
+            // --- MORE LOGGING ---
+            // fprintf(stderr, "[czmoney DEBUG] DB update executed. Affected rows: %d\n", affectedRows); // Removed fprintf
+            mLogger.debug("DB update executed. Affected rows: {}", affectedRows); // Also log via logger
+            // --- END MORE LOGGING ---
+
+            // --- 增强日志 ---
+            // mLogger.debug("SQL execution completed for addPlayerBalance. Affected rows: {}", affectedRows); // Redundant with above
+            // --- 增强日志结束 ---
+        } catch (const db::DatabaseException& dbEx) {
+            // 捕获数据库执行本身的异常
+            // --- MORE LOGGING ---
+            // fprintf(stderr, "[czmoney ERROR] DatabaseException during UPDATE: %s\n", dbEx.what()); // Removed fprintf
+            // fprintf(stderr, "[czmoney ERROR]   SQL: %s\n", sql.c_str()); // Removed fprintf
+            // fprintf(stderr, "[czmoney ERROR]   Params: [NewBalance=%lld, UUID=%s, Currency=%s]\n", (long long)newBalance, uuid.c_str(), currencyType.c_str()); // Removed fprintf
+            // --- END MORE LOGGING ---
+            mLogger.error("Database error during addPlayerBalance UPDATE execution: {}", dbEx.what());
+            mLogger.error("  SQL: {}", sql);
+            mLogger.error("  Params: [NewBalance={}, UUID={}, Currency={}]", newBalance, uuid, currencyType);
+            return false; // 数据库执行失败
+        } catch (const std::exception& stdEx) {
+            // 捕获其他可能的标准异常
+            // --- MORE LOGGING ---
+            // fprintf(stderr, "[czmoney ERROR] std::exception during UPDATE: %s\n", stdEx.what()); // Removed fprintf
+            // fprintf(stderr, "[czmoney ERROR]   SQL: %s\n", sql.c_str()); // Removed fprintf
+            // fprintf(stderr, "[czmoney ERROR]   Params: [NewBalance=%lld, UUID=%s, Currency=%s]\n", (long long)newBalance, uuid.c_str(), currencyType.c_str()); // Removed fprintf
+            // --- END MORE LOGGING ---
+            mLogger.error("Unexpected standard error during addPlayerBalance UPDATE execution: {}", stdEx.what());
+            mLogger.error("  SQL: {}", sql);
+            mLogger.error("  Params: [NewBalance={}, UUID={}, Currency={}]", newBalance, uuid, currencyType);
+            return false; // 其他执行失败
+        } catch (...) { // Catch-all
+             // --- MORE LOGGING ---
+            // fprintf(stderr, "[czmoney FATAL] Unknown exception during UPDATE!\n"); // Removed fprintf
+            // fprintf(stderr, "[czmoney FATAL]   SQL: %s\n", sql.c_str()); // Removed fprintf
+            // fprintf(stderr, "[czmoney FATAL]   Params: [NewBalance=%lld, UUID=%s, Currency=%s]\n", (long long)newBalance, uuid.c_str(), currencyType.c_str()); // Removed fprintf
+            // --- END MORE LOGGING ---
+            mLogger.fatal("Unknown exception during addPlayerBalance UPDATE execution!"); // Use fatal level
+             mLogger.fatal("  SQL: {}", sql);
+            mLogger.fatal("  Params: [NewBalance={}, UUID={}, Currency={}]", newBalance, uuid, currencyType);
+            return false; // Unknown failure
+        }
+
+
+        // 检查受影响的行数
         if (affectedRows <= 0) {
             // 如果没有行受影响，可能意味着账户在 getPlayerBalanceOrInit 之后被删除了？
-            // 或者 UPDATE 由于某种原因失败但未抛出异常
-            mLogger.error("增加余额时 UPDATE 操作影响了 {} 行 (预期 1 行)。UUID: {}, Currency: {}",
+            // 或者 UPDATE 由于某种原因失败但未抛出异常 (虽然上面 try-catch 应该捕获了)
+            mLogger.error("AddPlayerBalance UPDATE operation affected {} rows (expected 1). UUID: {}, Currency: {}",
                           affectedRows, uuid, currencyType);
             // 检查账户是否仍然存在
             if (!hasAccount(uuid, currencyType)) {
-                 mLogger.error(" - 账户似乎在增加余额操作期间消失了。");
+                 mLogger.error(" - Account seems to have disappeared during the add balance operation.");
             }
-            return false; // 更新失败
+            return false; // 更新逻辑失败
         }
 
         // 6. 记录流水
@@ -593,14 +647,14 @@ bool czmoney::MoneyManager::addPlayerBalance(
         mLogger.debug("成功为 UUID: {}, Currency: {} 增加余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToAdd), formatBalance(newBalance));
         return true;
 
-    } catch (const db::DatabaseException& e) {
-         mLogger.error("增加余额时发生数据库错误: {}", e.what());
+    } catch (const db::DatabaseException& e) { // 主要捕获 getPlayerBalanceOrInit 或 hasAccount 中的数据库错误
+         mLogger.error("Database error during addPlayerBalance (outside UPDATE execution): {}", e.what());
          return false;
     } catch (const std::runtime_error& e) { // Catch getPlayerBalanceOrInit exception
-        mLogger.error("增加余额失败 (获取或初始化时出错): {}", e.what());
+        mLogger.error("Runtime error during addPlayerBalance (likely from getPlayerBalanceOrInit): {}", e.what());
         return false;
-    } catch (const std::exception& e) {
-        mLogger.error("增加余额时发生意外错误: {}", e.what());
+    } catch (const std::exception& e) { // 捕获其他未预料的异常
+        mLogger.error("Unexpected standard error during addPlayerBalance: {}", e.what());
         return false;
     }
 }

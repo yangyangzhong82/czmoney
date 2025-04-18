@@ -77,43 +77,46 @@ namespace czmoney::api {
 
 // --- API 函数实现 ---
 
-std::optional<int64_t> getPlayerBalance(std::string_view uuid, std::string_view currencyType) {
+std::optional<double> getPlayerBalance(std::string_view uuid, std::string_view currencyType) {
     auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
     logger.debug("API::getPlayerBalance called for UUID: {}, Currency: {}", uuid, currencyType);
 
     if (auto* manager = getMoneyManagerInstance()) {
         // 注意：将 string_view 转换为 string
-        std::optional<int64_t> balance = manager->getPlayerBalance(std::string(uuid), std::string(currencyType));
-        if (balance) {
-            logger.debug("API::getPlayerBalance success for UUID: {}, Currency: {}. Balance: {}", uuid, currencyType, balance.value());
+        std::optional<int64_t> raw = manager->getPlayerBalance(std::string(uuid), std::string(currencyType));
+        if (raw) {
+            double processed = static_cast<double>(raw.value()) / 100.0;
+            logger.debug("API::getPlayerBalance success for UUID: {}, Currency: {}. Balance: {}", uuid, currencyType, processed);
+            return processed;
         } else {
             logger.debug("API::getPlayerBalance: Account not found for UUID: {}, Currency: {}", uuid, currencyType);
+            return std::nullopt;
         }
-        return balance;
     } else {
         logger.error("API::getPlayerBalance failed: Could not get MoneyManager instance.");
         return std::nullopt; // 获取 manager 失败
     }
 }
 
-int64_t getPlayerBalanceOrInit(std::string_view uuid, std::string_view currencyType) {
+double getPlayerBalanceOrInit(std::string_view uuid, std::string_view currencyType) {
     auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
     logger.debug("API::getPlayerBalanceOrInit called for UUID: {}, Currency: {}", uuid, currencyType);
 
     if (auto* manager = getMoneyManagerInstance()) {
         try {
             // 注意：将 string_view 转换为 string
-            int64_t balance = manager->getPlayerBalanceOrInit(std::string(uuid), std::string(currencyType));
-            logger.debug("API::getPlayerBalanceOrInit success for UUID: {}, Currency: {}. Balance: {}", uuid, currencyType, balance);
-            return balance;
+            int64_t raw = manager->getPlayerBalanceOrInit(std::string(uuid), std::string(currencyType));
+            double processed = static_cast<double>(raw) / 100.0;
+            logger.debug("API::getPlayerBalanceOrInit success for UUID: {}, Currency: {}. Balance: {}", uuid, currencyType, processed);
+            return processed;
         } catch (const std::exception& e) {
              // 内部 getPlayerBalanceOrInit 应该已经记录了错误，这里记录 API 层面的失败
              logger.error("API::getPlayerBalanceOrInit failed for UUID: {}, Currency: {}. Reason: {}", uuid, currencyType, e.what());
-             return 0LL; // 根据函数约定返回 0
+             return 0.0; // 根据函数约定返回 0
         }
     } else {
         logger.error("API::getPlayerBalanceOrInit failed: Could not get MoneyManager instance.");
-        return 0LL; // 获取 manager 失败时返回 0
+        return 0.0; // 获取 manager 失败时返回 0
     }
 }
 
@@ -171,9 +174,16 @@ bool addPlayerBalance(
     std::string_view reason2,
     std::string_view reason3
 ) {
+    // --- FORCE LOG AT ENTRY ---
+    // fprintf(stderr, "[czmoney API DEBUG] ENTERING addPlayerBalance(uuid=%s, type=%s, amount=%f)\n", // Removed fprintf
+    //         std::string(uuid).c_str(), std::string(currencyType).c_str(), amountToAdd);
+    // --- END FORCE LOG ---
     try {
         auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger(); // 获取 logger 实例
-        logger.debug("API::addPlayerBalance called for UUID: {}, Currency: {}, AmountToAdd: {}, Reason1: {}, Reason2: {}, Reason3: {}",
+        // --- FORCE LOG AFTER LOGGER ---
+        // fprintf(stderr, "[czmoney API DEBUG] Logger obtained in addPlayerBalance.\n"); // Removed fprintf
+        // --- END FORCE LOG ---
+        logger.debug("API::addPlayerBalance called (via logger) for UUID: {}, Currency: {}, AmountToAdd: {}, Reason1: {}, Reason2: {}, Reason3: {}",
                      uuid, currencyType, amountToAdd, reason1, reason2, reason3);
 
         // 转换并验证金额，要求为正数
@@ -209,22 +219,30 @@ bool addPlayerBalance(
         }
         return success;
     } else {
+        // --- FORCE LOG ---
+        // fprintf(stderr, "[czmoney API ERROR] Failed to get MoneyManager instance in addPlayerBalance.\n"); // Removed fprintf
+        // --- END FORCE LOG ---
         logger.error("API::addPlayerBalance failed: Could not get MoneyManager instance.");
         return false; // 获取 manager 失败
-        }
+    }
+    // Removed the duplicate 'else' block here
 
     } catch (const std::exception& e) {
         // Catch exceptions potentially from getLogger() or other unexpected places
-        fprintf(stderr, "[czmoney API FATAL] Exception in addPlayerBalance: %s\n", e.what());
+        // --- FORCE LOG ---
+        // fprintf(stderr, "[czmoney API FATAL] std::exception caught in addPlayerBalance: %s\n", e.what()); // Removed fprintf
+        // --- END FORCE LOG ---
         try {
             // Attempt to log using the instance if possible, otherwise rely on stderr
             czmoney::MyMod::getInstance().getSelf().getLogger().error("API::addPlayerBalance encountered exception: {}", e.what());
         } catch (...) {} // Ignore logging errors here
         return false; // Indicate failure
     } catch (...) {
-        fprintf(stderr, "[czmoney API FATAL] Unknown exception in addPlayerBalance.\n");
+         // --- FORCE LOG ---
+         // fprintf(stderr, "[czmoney API FATAL] Unknown exception caught in addPlayerBalance.\n"); // Removed fprintf
+         // --- END FORCE LOG ---
          try {
-            czmoney::MyMod::getInstance().getSelf().getLogger().error("API::addPlayerBalance encountered unknown exception.");
+            czmoney::MyMod::getInstance().getSelf().getLogger().fatal("API::addPlayerBalance encountered unknown exception."); // Use fatal level
         } catch (...) {} // Ignore logging errors here
         return false; // Indicate failure
     }
@@ -437,6 +455,42 @@ bool transferBalance(
     } else {
         logger.error("API::transferBalance failed: Could not get MoneyManager instance.");
         return false; // 获取 manager 失败
+    }
+}
+
+// 新增：原始余额 API 实现
+std::optional<int64_t> getRawPlayerBalance(std::string_view uuid, std::string_view currencyType) {
+    auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger();
+    logger.debug("API::getRawPlayerBalance called for UUID: {}, Currency: {}", uuid, currencyType);
+    if (auto* manager = getMoneyManagerInstance()) {
+        std::optional<int64_t> raw = manager->getPlayerBalance(std::string(uuid), std::string(currencyType));
+        if (raw) {
+            logger.debug("API::getRawPlayerBalance success for UUID: {}, Currency: {}. Raw: {}", uuid, currencyType, raw.value());
+        } else {
+            logger.debug("API::getRawPlayerBalance: Account not found for UUID: {}, Currency: {}", uuid, currencyType);
+        }
+        return raw;
+    } else {
+        logger.error("API::getRawPlayerBalance failed: Could not get MoneyManager instance.");
+        return std::nullopt;
+    }
+}
+
+int64_t getRawPlayerBalanceOrInit(std::string_view uuid, std::string_view currencyType) {
+    auto& logger = czmoney::MyMod::getInstance().getSelf().getLogger();
+    logger.debug("API::getRawPlayerBalanceOrInit called for UUID: {}, Currency: {}", uuid, currencyType);
+    if (auto* manager = getMoneyManagerInstance()) {
+        try {
+            int64_t raw = manager->getPlayerBalanceOrInit(std::string(uuid), std::string(currencyType));
+            logger.debug("API::getRawPlayerBalanceOrInit success for UUID: {}, Currency: {}. Raw: {}", uuid, currencyType, raw);
+            return raw;
+        } catch (const std::exception& e) {
+            logger.error("API::getRawPlayerBalanceOrInit failed for UUID: {}, Currency: {}. Reason: {}", uuid, currencyType, e.what());
+            return 0LL;
+        }
+    } else {
+        logger.error("API::getRawPlayerBalanceOrInit failed: Could not get MoneyManager instance.");
+        return 0LL;
     }
 }
 

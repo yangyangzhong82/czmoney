@@ -13,7 +13,7 @@ end
 add_requires("sqlitecpp")
 add_requires("mysql")
 add_requires("levibuildscript")
-
+add_requires("legacyremotecall")
 if not has_config("vs_runtime") then
     set_runtimes("MD")
 end
@@ -31,7 +31,7 @@ target("czmoney") -- Change this to your mod name.
     add_defines("NOMINMAX", "UNICODE")
     add_defines("CZMONEY_API_EXPORTS") 
     add_packages("levilamina","sqlitecpp","mysql")
-    set_exceptions("none") -- To avoid conflicts with /EHa.
+    add_packages("legacyremotecall")
     set_kind("shared")
     set_languages("c++20")
     set_symbols("debug")

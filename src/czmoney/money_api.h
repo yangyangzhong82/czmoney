@@ -45,27 +45,45 @@ struct TransactionLogEntry {
 namespace czmoney::api {
 
 /**
- * @brief 获取玩家指定货币类型的余额 (整数形式，实际金额 * 100)
+ * @brief 获取玩家指定货币类型的余额 (浮点数形式，实际金额)
  *
  * 如果账户不存在，此函数 *不会* 自动初始化账户。
  * @param uuid 玩家的 UUID
  * @param currencyType 货币类型 (例如 "money", "points")
- * @return std::optional<int64_t> 如果账户存在，返回余额；否则返回 std::nullopt
+ * @return std::optional<double> 如果账户存在，返回余额；否则返回 std::nullopt
  */
-CZMONEY_API std::optional<int64_t> getPlayerBalance(std::string_view uuid, std::string_view currencyType);
+CZMONEY_API std::optional<double> getPlayerBalance(std::string_view uuid, std::string_view currencyType);
 
 /**
- * @brief 获取玩家指定货币类型的余额，如果不存在则根据配置初始化 (整数形式，实际金额 * 100)
+ * @brief 获取玩家指定货币类型的原始余额 (整数形式，实际金额 * 100)
+ *
+ * 如果账户不存在，此函数 *不会* 自动初始化账户。
+ * @param uuid 玩家的 UUID
+ * @param currencyType 货币类型 (例如 "money", "points")
+ * @return std::optional<int64_t> 如果账户存在，返回原始余额；否则返回 std::nullopt
+ */
+CZMONEY_API std::optional<int64_t> getRawPlayerBalance(std::string_view uuid, std::string_view currencyType);
+
+/**
+ * @brief 获取玩家指定货币类型的余额，如果不存在则根据配置初始化 (浮点数形式，实际金额)
  * @param uuid 玩家的 UUID
  * @param currencyType 货币类型
- * @return int64_t 返回玩家的余额。如果账户不存在，会先初始化再返回初始值。
+ * @return double 返回玩家的余额。如果账户不存在，会先初始化再返回初始值。
  * @note 如果数据库操作失败或无法获取初始值，行为未定义（可能返回 0 或抛出异常，取决于内部实现）。
  *       建议先使用 hasAccount 检查。
  */
-CZMONEY_API int64_t getPlayerBalanceOrInit(std::string_view uuid, std::string_view currencyType);
+CZMONEY_API double getPlayerBalanceOrInit(std::string_view uuid, std::string_view currencyType);
 
 /**
- * @brief 设置玩家指定货币类型的余额 (整数形式，实际金额 * 100)
+ * @brief 获取玩家指定货币类型的原始余额，如果不存在则根据配置初始化 (整数形式，实际金额 * 100)
+ * @param uuid 玩家的 UUID
+ * @param currencyType 货币类型
+ * @return int64_t 返回玩家的原始余额。如果账户不存在，会先初始化再返回初始值。
+ */
+CZMONEY_API int64_t getRawPlayerBalanceOrInit(std::string_view uuid, std::string_view currencyType);
+
+/**
+ * @brief 设置玩家指定货币类型的余额 (浮点数形式，实际金额)
  *
  * 如果账户不存在，将自动创建。
  * @param uuid 玩家的 UUID
