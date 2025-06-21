@@ -1,12 +1,11 @@
 #include "czmoney/MyMod.h"
-#include "ll/api/mod/RegisterHelper.h"
-#include "ll/api/io/Logger.h"
-#include "ll/api/Config.h"
-#include "czmoney/money.h"
 #include "czmoney/command.h" // 包含 command.h
+#include "czmoney/money/money.h"
+#include "czmoney/money/money_api.h"
+#include "ll/api/Config.h"
+#include "ll/api/io/Logger.h"
+#include "ll/api/mod/RegisterHelper.h"
 #include <RemoteCallAPI.h>
-#include "czmoney/money_api.h"
-#include <stdexcept>
 #include <filesystem>
 #include <stdexcept>
 
@@ -70,6 +69,17 @@ bool MyMod::enable() {
                 cfg.db_password,
                 cfg.db_name,
                 cfg.db_port
+            );
+        } else if (cfg.db_type == "postgresql") {
+            logger.info("Using PostgreSQL database: host={}, user={}, db={}, port={}",
+                        cfg.db_pg_host, cfg.db_pg_user, cfg.db_pg_name, cfg.db_pg_port);
+            // 创建 PostgreSQLConnection 实例
+            mDbConnection = std::make_unique<db::PostgreSQLConnection>(
+                cfg.db_pg_host,
+                cfg.db_pg_user,
+                cfg.db_pg_password,
+                cfg.db_pg_name,
+                cfg.db_pg_port
             );
         } else if (cfg.db_type == "sqlite") {
             // 获取插件数据目录的绝对路径

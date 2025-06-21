@@ -1,8 +1,9 @@
-#include "czmoney/money.h"
-#include "czmoney/money_api.h" // 包含 API 头文件以获取 TransactionLogEntry 定义
+#include "czmoney/money/money.h"
 #include "czmoney/database_interface.h" // 包含数据库接口
-#include "ll/api/mod/NativeMod.h"
+#include "czmoney/money/money_api.h"    // 包含 API 头文件以获取 TransactionLogEntry 定义
 #include "ll/api/memory/Hook.h"
+#include "ll/api/mod/NativeMod.h"
+
 // #include <mysql.h> // 不再直接需要 MySQL 头文件
 #include <stdexcept>
 #include <vector>
@@ -119,6 +120,17 @@ bool MoneyManager::initializeTable() {
                 UNIQUE (uuid, currency_type)
             );
         )";
+    } else if (dbType == "postgresql") {
+        createBalancesTableSQL = R"(
+            CREATE TABLE IF NOT EXISTS player_balances (
+                id BIGSERIAL PRIMARY KEY,
+                uuid VARCHAR(36) NOT NULL,
+                currency_type VARCHAR(50) NOT NULL,
+                amount BIGINT NOT NULL DEFAULT 0,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (uuid, currency_type)
+            );
+        )";
     } else {
         mLogger.error("不支持的数据库类型 '{}'，无法创建 player_balances 表。", dbType);
         return false;
@@ -189,6 +201,24 @@ bool MoneyManager::initializeLogTable() {
         createIndexSQLs.push_back("CREATE INDEX IF NOT EXISTS idx_uuid ON economy_log (uuid);");
         createIndexSQLs.push_back("CREATE INDEX IF NOT EXISTS idx_currency_type ON economy_log (currency_type);");
         createIndexSQLs.push_back("CREATE INDEX IF NOT EXISTS idx_timestamp ON economy_log (timestamp);");
+    } else if (dbType == "postgresql") {
+        createLogTableSQL = R"(
+            CREATE TABLE IF NOT EXISTS economy_log (
+                id BIGSERIAL PRIMARY KEY,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                uuid VARCHAR(36) NOT NULL,
+                currency_type VARCHAR(50) NOT NULL,
+                change_amount BIGINT NOT NULL,
+                previous_amount BIGINT NOT NULL,
+                reason1 VARCHAR(255) DEFAULT NULL,
+                reason2 VARCHAR(255) DEFAULT NULL,
+                reason3 VARCHAR(255) DEFAULT NULL
+            );
+        )";
+        // PostgreSQL 在 CREATE TABLE 中创建索引
+        createIndexSQLs.push_back("CREATE INDEX IF NOT EXISTS idx_economy_log_uuid ON economy_log (uuid);");
+        createIndexSQLs.push_back("CREATE INDEX IF NOT EXISTS idx_economy_log_currency_type ON economy_log (currency_type);");
+        createIndexSQLs.push_back("CREATE INDEX IF NOT EXISTS idx_economy_log_timestamp ON economy_log (timestamp);");
     } else {
          mLogger.error("不支持的数据库类型 '{}'，无法创建 economy_log 表。", dbType);
         return false;
@@ -233,10 +263,19 @@ bool czmoney::MoneyManager::logTransaction(
     //     return true; // 如果禁用日志，则视为成功
     // }
 
-    const std::string sql = R"(
-        INSERT INTO economy_log (uuid, currency_type, change_amount, previous_amount, reason1, reason2, reason3)
-        VALUES (?, ?, ?, ?, ?, ?, ?);
-    )";
+    std::string sql;
+    std::string dbType = mDbConnection.getDbType();
+    if (dbType == "postgresql") {
+        sql = R"(
+            INSERT INTO economy_log (uuid, currency_type, change_amount, previous_amount, reason1, reason2, reason3)
+            VALUES ($1, $2, $3, $4, $5, $6, $7);
+        )";
+    } else {
+        sql = R"(
+            INSERT INTO economy_log (uuid, currency_type, change_amount, previous_amount, reason1, reason2, reason3)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+        )";
+    }
 
     // 将可选的 reason 字符串转换为 DbValue (处理空字符串)
     // 注意：数据库接口应该能处理 std::string，空字符串通常会插入空值或空字符串
@@ -287,7 +326,13 @@ std::optional<int64_t> czmoney::MoneyManager::getPlayerBalance(const std::string
         return std::nullopt;
     }
 
-    const std::string sql = "SELECT amount FROM player_balances WHERE uuid = ? AND currency_type = ?;";
+    std::string sql;
+    std::string dbType = mDbConnection.getDbType();
+    if (dbType == "postgresql") {
+        sql = "SELECT amount FROM player_balances WHERE uuid = $1 AND currency_type = $2;";
+    } else {
+        sql = "SELECT amount FROM player_balances WHERE uuid = ? AND currency_type = ?;";
+    }
     db::DbParams params = {uuid, currencyType}; // 使用 std::string
 
     mLogger.debug("Executing prepared SQL for getPlayerBalance: {} with params: [{}, {}]", sql, uuid, currencyType);
@@ -476,12 +521,17 @@ bool czmoney::MoneyManager::setPlayerBalance(
 
     if (dbType == "sqlite") {
         // SQLite 使用 INSERT OR REPLACE
-        sql = "INSERT OR REPLACE INTO player_balances (uuid, currency_type, amount) VALUES (?, ?, ?);";
+        sql = "INSERT OR REPLACE INTO player_balances (uuid, currency_type, amount) VALUES ($1, $2, $3);";
         params = {uuid, currencyType, amount};
     } else if (dbType == "mysql") {
         // MySQL 使用 INSERT ... ON DUPLICATE KEY UPDATE
         sql = "INSERT INTO player_balances (uuid, currency_type, amount) VALUES (?, ?, ?) "
               "ON DUPLICATE KEY UPDATE amount = VALUES(amount);";
+        params = {uuid, currencyType, amount};
+    } else if (dbType == "postgresql") {
+        // PostgreSQL 使用 INSERT ... ON CONFLICT (UPSERT)
+        sql = "INSERT INTO player_balances (uuid, currency_type, amount) VALUES ($1, $2, $3) "
+              "ON CONFLICT (uuid, currency_type) DO UPDATE SET amount = EXCLUDED.amount;";
         params = {uuid, currencyType, amount};
     } else {
         mLogger.error("不支持的数据库类型 '{}'，无法执行 setPlayerBalance。", dbType);
@@ -560,16 +610,20 @@ bool czmoney::MoneyManager::addPlayerBalance(
              mLogger.error("增加余额时检测到潜在溢出。UUID: {}, Currency: {}", uuid, currencyType);
              return false;
         }
-        int64_t newBalance = currentBalance + amountToAdd;
-
-        // 4. 准备 SQL 和参数
-        const std::string sql = "UPDATE player_balances SET amount = ? WHERE uuid = ? AND currency_type = ?;";
-        db::DbParams params = {newBalance, uuid, currencyType};
+        // 4. 准备 SQL 和参数 (原子更新)
+        std::string sql;
+        std::string dbType = mDbConnection.getDbType();
+        if (dbType == "postgresql") {
+            sql = "UPDATE player_balances SET amount = amount + $1 WHERE uuid = $2 AND currency_type = $3;";
+        } else {
+            sql = "UPDATE player_balances SET amount = amount + ? WHERE uuid = ? AND currency_type = ?;";
+        }
+        db::DbParams params = {amountToAdd, uuid, currencyType};
 
         // --- 增强日志 ---
         mLogger.debug("Preparing to execute SQL for addPlayerBalance:");
         mLogger.debug("  SQL: {}", sql);
-        mLogger.debug("  Params: [NewBalance={}, UUID={}, Currency={}]", newBalance, uuid, currencyType);
+        mLogger.debug("  Params: [AmountToAdd={}, UUID={}, Currency={}]", amountToAdd, uuid, currencyType);
         // --- 增强日志结束 ---
 
         // 5. 执行更新
@@ -595,32 +649,32 @@ bool czmoney::MoneyManager::addPlayerBalance(
             // --- MORE LOGGING ---
             // fprintf(stderr, "[czmoney ERROR] DatabaseException during UPDATE: %s\n", dbEx.what()); // Removed fprintf
             // fprintf(stderr, "[czmoney ERROR]   SQL: %s\n", sql.c_str()); // Removed fprintf
-            // fprintf(stderr, "[czmoney ERROR]   Params: [NewBalance=%lld, UUID=%s, Currency=%s]\n", (long long)newBalance, uuid.c_str(), currencyType.c_str()); // Removed fprintf
+            // fprintf(stderr, "[czmoney ERROR]   Params: [AmountToAdd=%lld, UUID=%s, Currency=%s]\n", (long long)amountToAdd, uuid.c_str(), currencyType.c_str()); // Removed fprintf
             // --- END MORE LOGGING ---
             mLogger.error("Database error during addPlayerBalance UPDATE execution: {}", dbEx.what());
             mLogger.error("  SQL: {}", sql);
-            mLogger.error("  Params: [NewBalance={}, UUID={}, Currency={}]", newBalance, uuid, currencyType);
+            mLogger.error("  Params: [AmountToAdd={}, UUID={}, Currency={}]", amountToAdd, uuid, currencyType);
             return false; // 数据库执行失败
         } catch (const std::exception& stdEx) {
             // 捕获其他可能的标准异常
             // --- MORE LOGGING ---
             // fprintf(stderr, "[czmoney ERROR] std::exception during UPDATE: %s\n", stdEx.what()); // Removed fprintf
             // fprintf(stderr, "[czmoney ERROR]   SQL: %s\n", sql.c_str()); // Removed fprintf
-            // fprintf(stderr, "[czmoney ERROR]   Params: [NewBalance=%lld, UUID=%s, Currency=%s]\n", (long long)newBalance, uuid.c_str(), currencyType.c_str()); // Removed fprintf
+            // fprintf(stderr, "[czmoney ERROR]   Params: [AmountToAdd=%lld, UUID=%s, Currency=%s]\n", (long long)amountToAdd, uuid.c_str(), currencyType.c_str()); // Removed fprintf
             // --- END MORE LOGGING ---
             mLogger.error("Unexpected standard error during addPlayerBalance UPDATE execution: {}", stdEx.what());
             mLogger.error("  SQL: {}", sql);
-            mLogger.error("  Params: [NewBalance={}, UUID={}, Currency={}]", newBalance, uuid, currencyType);
+            mLogger.error("  Params: [AmountToAdd={}, UUID={}, Currency={}]", amountToAdd, uuid, currencyType);
             return false; // 其他执行失败
         } catch (...) { // Catch-all
              // --- MORE LOGGING ---
             // fprintf(stderr, "[czmoney FATAL] Unknown exception during UPDATE!\n"); // Removed fprintf
             // fprintf(stderr, "[czmoney FATAL]   SQL: %s\n", sql.c_str()); // Removed fprintf
-            // fprintf(stderr, "[czmoney FATAL]   Params: [NewBalance=%lld, UUID=%s, Currency=%s]\n", (long long)newBalance, uuid.c_str(), currencyType.c_str()); // Removed fprintf
+            // fprintf(stderr, "[czmoney FATAL]   Params: [AmountToAdd=%lld, UUID=%s, Currency=%s]\n", (long long)amountToAdd, uuid.c_str(), currencyType.c_str()); // Removed fprintf
             // --- END MORE LOGGING ---
             mLogger.fatal("Unknown exception during addPlayerBalance UPDATE execution!"); // Use fatal level
              mLogger.fatal("  SQL: {}", sql);
-            mLogger.fatal("  Params: [NewBalance={}, UUID={}, Currency={}]", newBalance, uuid, currencyType);
+            mLogger.fatal("  Params: [AmountToAdd={}, UUID={}, Currency={}]", amountToAdd, uuid, currencyType);
             return false; // Unknown failure
         }
 
@@ -644,7 +698,7 @@ bool czmoney::MoneyManager::addPlayerBalance(
             // 考虑是否需要回滚或采取其他措施
         }
 
-        mLogger.debug("成功为 UUID: {}, Currency: {} 增加余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToAdd), formatBalance(newBalance));
+        mLogger.debug("成功为 UUID: {}, Currency: {} 增加余额 {}, 当前余额: {}", uuid, currencyType, formatBalance(amountToAdd), formatBalance(currentBalance + amountToAdd));
         return true;
 
     } catch (const db::DatabaseException& e) { // 主要捕获 getPlayerBalanceOrInit 或 hasAccount 中的数据库错误
@@ -705,53 +759,65 @@ bool czmoney::MoneyManager::subtractPlayerBalance(
         }
 
         // 4. 检查下溢 (理论上 currentBalance >= amountToSubtract > 0，不太可能下溢，但保留检查)
+         // 4. 检查下溢 (理论上 currentBalance >= amountToSubtract > 0，不太可能下溢，但保留检查)
          if (currentBalance < std::numeric_limits<int64_t>::min() + amountToSubtract) {
              mLogger.error("减少余额时检测到潜在下溢。UUID: {}, Currency: {}", uuid, currencyType);
              return false;
          }
-        int64_t newBalance = currentBalance - amountToSubtract;
+        // int64_t newBalance = currentBalance - amountToSubtract; // 不再需要此行
 
-        // 5. 检查扣款后是否低于最低余额
+        // 5. 检查扣款后是否低于最低余额 (在 SQL 中原子性检查)
         int64_t minBalance = getMinimumBalance(currencyType);
-        if (newBalance < minBalance) {
-            mLogger.error("无法减少余额：操作将使 UUID: {} 的 Currency: {} 余额 ({}) 低于最低允许值 ({})",
-                          uuid, currencyType, formatBalance(newBalance), formatBalance(minBalance));
-            return false;
+        // if (newBalance < minBalance) { // 此检查现在在 SQL 中完成
+        //     mLogger.error("无法减少余额：操作将使 UUID: {} 的 Currency: {} 余额 ({}) 低于最低允许值 ({})",
+        //                   uuid, currencyType, formatBalance(newBalance), formatBalance(minBalance));
+        //     return false;
+        // }
+
+        // 6. 准备 SQL 和参数 (原子更新，包含余额和最低余额检查)
+        std::string sql;
+        std::string dbType = mDbConnection.getDbType();
+        if (dbType == "postgresql") {
+            // PostgreSQL: amount = amount - $1 WHERE uuid = $2 AND currency_type = $3 AND amount >= $4 AND (amount - $5) >= $6;
+            sql = "UPDATE player_balances SET amount = amount - $1 WHERE uuid = $2 AND currency_type = $3 AND amount >= $4 AND (amount - $5) >= $6;";
+        } else {
+            // SQLite/MySQL: amount = amount - ? WHERE uuid = ? AND currency_type = ? AND amount >= ? AND (amount - ?) >= ?;
+            sql = "UPDATE player_balances SET amount = amount - ? WHERE uuid = ? AND currency_type = ? AND amount >= ? AND (amount - ?) >= ?;";
         }
+        db::DbParams params = {
+            amountToSubtract, // $1 / ?
+            uuid,             // $2 / ?
+            currencyType,     // $3 / ?
+            amountToSubtract, // $4 / ? (检查当前余额是否足够扣除)
+            amountToSubtract, // $5 / ? (检查扣除后是否低于最低余额)
+            minBalance        // $6 / ? (最低余额)
+        };
 
-        // 6. 准备 SQL 和参数
-        const std::string sql = "UPDATE player_balances SET amount = ? WHERE uuid = ? AND currency_type = ?;";
-        db::DbParams params = {newBalance, uuid, currencyType};
-
-        mLogger.debug("Executing prepared SQL for subtractPlayerBalance: {} with params: [{}, {}, {}]",
-                      sql, newBalance, uuid, currencyType);
+        mLogger.debug("Executing prepared SQL for subtractPlayerBalance: {} with params: [{}, {}, {}, {}, {}, {}]",
+                      sql, amountToSubtract, uuid, currencyType, amountToSubtract, amountToSubtract, minBalance);
 
         // 7. 执行更新
         int affectedRows = mDbConnection.executePrepared(sql, params);
 
         if (affectedRows <= 0) {
-             mLogger.error("减少余额时 UPDATE 操作影响了 {} 行 (预期 1 行)。UUID: {}, Currency: {}",
+             mLogger.warn("减少余额时 UPDATE 操作影响了 {} 行 (预期 1 行)。UUID: {}, Currency: {}",
                           affectedRows, uuid, currencyType);
-             // 检查账户是否仍然存在
-             if (!hasAccount(uuid, currencyType)) {
-                  mLogger.error(" - 账户似乎在减少余额操作期间消失了。");
-             } else {
-                 // 检查余额是否真的没变 (可能并发问题？)
-                 std::optional<int64_t> balanceAfter = getPlayerBalance(uuid, currencyType);
-                 if (balanceAfter.has_value() && balanceAfter.value() == currentBalance) {
-                      mLogger.warn(" - 余额似乎未被 UPDATE 操作改变。");
-                 }
-             }
+             // 如果没有行受影响，可能是余额不足或低于最低余额，或者账户不存在
+             // 此时不需要额外检查 hasAccount，因为 SQL 已经处理了这些条件
+             mLogger.warn(" - 扣款失败，可能原因：余额不足，或扣款后低于最低余额，或账户不存在。");
              return false; // 更新失败
         }
 
         // 8. 记录流水 (注意 changeAmount 是负数)
+        // 此时 newBalance 无法直接从 C++ 计算，但我们可以通过 currentBalance - amountToSubtract 得到理论上的新余额
+        // 或者，如果需要精确的最终余额，可以再次查询数据库，但那会引入另一个读操作
+        // 为了保持原子性，我们假设更新成功，并使用操作前的余额和变动量来记录流水
         if (!logTransaction(uuid, currencyType, -amountToSubtract, currentBalance, reason1, reason2, reason3)) {
             mLogger.error("数据库余额已更新，但记录流水失败！(减少余额) UUID: {}, Currency: {}", uuid, currencyType);
             // 考虑是否需要回滚或采取其他措施
         }
 
-        mLogger.debug("成功为 UUID: {}, Currency: {} 减少余额 {}, 新余额: {}", uuid, currencyType, formatBalance(amountToSubtract), formatBalance(newBalance));
+        mLogger.debug("成功为 UUID: {}, Currency: {} 减少余额 {}, 当前余额: {}", uuid, currencyType, formatBalance(amountToSubtract), formatBalance(currentBalance - amountToSubtract));
         return true;
 
     } catch (const db::DatabaseException& e) {
@@ -1069,16 +1135,26 @@ std::vector<czmoney::TransactionLogEntry> czmoney::MoneyManager::queryTransactio
     std::stringstream sqlBuilder;
     sqlBuilder << "SELECT id, timestamp, uuid, currency_type, change_amount, previous_amount, reason1, reason2, reason3 FROM economy_log";
 
+    std::string dbType = mDbConnection.getDbType(); // 获取数据库类型
     std::vector<std::string> whereConditions;
     db::DbParams params;
+    int paramCounter = 0; // 用于 PostgreSQL 的 $1, $2 占位符
+
+    auto getPlaceholder = [&]() -> std::string {
+        if (dbType == "postgresql") {
+            paramCounter++;
+            return "$" + std::to_string(paramCounter);
+        }
+        return "?"; // 默认使用 ?
+    };
 
     auto addCondition = [&](const std::string& column, const std::optional<std::string>& value, bool useLike = false) {
         if (value.has_value() && !value.value().empty()) {
             if (useLike) {
-                whereConditions.push_back(column + " LIKE ?");
+                whereConditions.push_back(column + " LIKE " + getPlaceholder());
                 params.emplace_back("%" + value.value() + "%"); // 添加 LIKE 参数
             } else {
-                whereConditions.push_back(column + " = ?");
+                whereConditions.push_back(column + " = " + getPlaceholder());
                 params.emplace_back(value.value()); // 添加精确匹配参数
             }
         }
@@ -1086,7 +1162,7 @@ std::vector<czmoney::TransactionLogEntry> czmoney::MoneyManager::queryTransactio
 
     auto addTimeCondition = [&](const std::string& column, const std::optional<std::string>& value, const std::string& op) {
          if (value.has_value() && !value.value().empty()) {
-             whereConditions.push_back(column + " " + op + " ?");
+             whereConditions.push_back(column + " " + op + " " + getPlaceholder());
              params.emplace_back(value.value()); // 时间戳作为字符串传递
          }
     };

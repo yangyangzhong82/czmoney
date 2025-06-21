@@ -33,15 +33,22 @@ struct CurrencyConfig {
 struct Config {
     int version = 1; // 配置文件版本号
 
-    // 数据库类型 ("mysql" 或 "sqlite")
+    // 数据库类型 ("mysql", "sqlite", 或 "postgresql")
     std::string db_type = "mysql";
 
     // --- MySQL 连接设置 (仅当 db_type 为 "mysql" 时使用) ---
     std::string db_host     = "127.0.0.1";
-    std::string db_user     = "your_username";
+    std::string db_user     = "root";
     std::string db_password = "your_password";
     std::string db_name     = "your_database";
     unsigned int db_port    = 3306;
+
+    // --- PostgreSQL 连接设置 (仅当 db_type 为 "postgresql" 时使用) ---
+    std::string db_pg_host     = "127.0.0.1";
+    std::string db_pg_user     = "postgres";
+    std::string db_pg_password = "your_password";
+    std::string db_pg_name     = "your_database";
+    unsigned int db_pg_port    = 5432;
 
     // --- SQLite 连接设置 (仅当 db_type 为 "sqlite" 时使用) ---
     std::string db_sqlite_path = "plugins/czmoney/czmoney.db"; // SQLite 数据库文件路径 (相对路径)
@@ -69,6 +76,12 @@ struct Config {
         self(db_user, "database", "mysql", "user");
         self(db_password, "database", "mysql", "password");
         self(db_name, "database", "mysql", "databaseName");
+        // PostgreSQL 设置 (分组)
+        self(db_pg_host, "database", "postgresql", "host");
+        self(db_pg_port, "database", "postgresql", "port");
+        self(db_pg_user, "database", "postgresql", "user");
+        self(db_pg_password, "database", "postgresql", "password");
+        self(db_pg_name, "database", "postgresql", "databaseName");
         // SQLite 设置 (分组)
         self(db_sqlite_path, "database", "sqlite", "path");
         // 其他设置

@@ -1,7 +1,8 @@
-#include "czmoney/mysql.h"
+#include "czmoney/db/mysql.h"
 #include <utility> // For std::move
-#include <vector>  // For DbResult, DbRow
 #include <variant> // For DbValue
+#include <vector>  // For DbResult, DbRow
+
 
 // Define my_bool if it's not defined by mysql.h (common issue)
 // my_bool is typically defined as char in older versions or specific configs.

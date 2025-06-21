@@ -1,8 +1,9 @@
-#include "czmoney/sqlite.h"
-#include <utility> // For std::move
+#include "czmoney/db/sqlite.h"
 #include <filesystem> // For creating directories if needed
-#include <vector> // For DbResult and DbRow
-#include <variant> // For DbValue
+#include <utility>    // For std::move
+#include <variant>    // For DbValue
+#include <vector>     // For DbResult and DbRow
+
 
 namespace db {
 

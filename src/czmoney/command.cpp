@@ -1,6 +1,6 @@
 #include "czmoney/command.h"
 #include "czmoney/MyMod.h"
-#include "czmoney/money.h"
+#include "czmoney/money/money.h"
 #include "ll/api/command/CommandRegistrar.h"
 #include "ll/api/command/CommandHandle.h"
 #include "ll/api/command/EnumName.h"
@@ -14,7 +14,7 @@
 #include "mc/world/actor/player/Player.h"
 #include "mc/platform/UUID.h"
 #include "ll/api/service/PlayerInfo.h"
-#include "czmoney/money_api.h" // 包含 TransactionLogEntry
+#include "czmoney/money/money_api.h" // 包含 TransactionLogEntry
 #include <string>
 #include <vector>
 #include <optional>
@@ -27,8 +27,8 @@ namespace czmoney {
 
 using ll::command::CommandRegistrar;
 using ll::command::CommandHandle;
-using ll::command::SoftEnum; // 新增 using
-using ll::service::PlayerInfo; // 新增 using
+using ll::command::SoftEnum; 
+using ll::service::PlayerInfo; 
 
 // 辅助函数：获取要操作的货币类型
 std::string getTargetCurrencyType(const SoftEnum<CurrencyTypeEnum>& inputType) {
@@ -760,9 +760,6 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                     }
                      sendFeedback(output, feedbackSender, true);
 
-                     // (可选) 给在线的收款人发送通知
-                     // 移除 isOnline 检查，直接尝试发送
-                     // if (receiverPlayer->isOnline()) { // 确保玩家仍然在线
                           std::string feedbackReceiver;
                           if (taxAmount > 0) {
                                feedbackReceiver = fmt::format(
@@ -781,10 +778,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                                   senderName
                               );
                           }
-                          // 使用 sendMessage 或类似方法发送消息给收款人
                           receiverPlayer->sendMessage(feedbackReceiver);
-                          // 或者使用 output.success 但这会显示给命令执行者
-                         // output.success(fmt::format("(Notified {})", receiverName));
                     // }
 
                  } else {

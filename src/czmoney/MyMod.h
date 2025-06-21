@@ -2,10 +2,11 @@
 
 #include "ll/api/mod/NativeMod.h"
 #include "czmoney/database_interface.h" // 包含数据库接口
-#include "czmoney/mysql.h" // 仍然需要包含，因为 enable 中可能创建 MySQLConnection
-#include "czmoney/sqlite.h" // 包含 SQLite 连接头文件
+#include "db/mysql.h" // 仍然需要包含，因为 enable 中可能创建 MySQLConnection
+#include "db/sqlite.h" // 包含 SQLite 连接头文件
+#include "db/postgresql.h" // 包含 PostgreSQL 连接头文件
 #include "czmoney/config.h"
-#include "czmoney/money.h" // 包含 MoneyManager 头文件
+#include "czmoney/money/money.h" // 包含 MoneyManager 头文件
 #include <memory>      // 为了 std::unique_ptr
 #include <filesystem> // 为了 std::filesystem
 
