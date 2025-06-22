@@ -10,6 +10,8 @@
 #include <memory>      // 为了 std::unique_ptr
 #include <filesystem> // 为了 std::filesystem
 
+
+
 namespace czmoney {
 
 class MyMod {
@@ -18,7 +20,6 @@ public:
     static MyMod& getInstance();
 
     MyMod() : mSelf(*ll::mod::NativeMod::current()) {}
-
     [[nodiscard]] ll::mod::NativeMod& getSelf() const { return mSelf; }
 
     /// @return True if the mod is loaded successfully.
@@ -40,6 +41,8 @@ public:
     /// @return A reference to the MoneyManager instance.
     /// @warning Throws if the manager is not initialized (mod not enabled).
     [[nodiscard]] MoneyManager& getMoneyManager();
+
+
 
 
 private:

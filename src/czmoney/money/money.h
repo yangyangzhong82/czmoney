@@ -7,6 +7,7 @@
 #include "ll/api/io/Logger.h" // 引入 LeviLamina 的日志记录器
 #include "czmoney/config.h" // 包含配置文件头文件
 #include "czmoney/database_interface.h" // 包含数据库接口
+#include "czmoney/money/money_api.h" // 包含 MoneyApiResult 枚举
 
 // 前向声明 (Forward declaration)
 namespace db {
@@ -15,11 +16,19 @@ class IDatabaseConnection; // 前向声明接口
 
 namespace czmoney {
 
-// TransactionLogEntry 结构体现在定义在 money_api.h 中
-struct TransactionLogEntry; // 前向声明，如果 MoneyManager 内部只需要指针或引用
-                            // 但由于返回类型是 std::vector<TransactionLogEntry>，
-                            // 包含 money_api.h 会更直接，或者确保 money.cpp 包含它。
-                            // 这里暂时保留前向声明，依赖 money.cpp 包含 money_api.h
+// TransactionLogEntry 结构体定义
+// 核心业务逻辑和 API 都需要此结构体，因此将其放在 money.h 中
+struct TransactionLogEntry {
+    int64_t            id;
+    std::string        timestamp; // 使用字符串存储从数据库获取的时间戳
+    std::string        uuid;
+    std::string        currencyType;
+    double             changeAmount;   // API 和 MoneyManager 内部都使用 double (元)
+    double             previousAmount; // API 和 MoneyManager 内部都使用 double (元)
+    std::optional<std::string> reason1; // 使用 optional 处理可能为 NULL 的字段
+    std::optional<std::string> reason2;
+    std::optional<std::string> reason3;
+};
 
 // Config 结构体已包含
 
@@ -213,6 +222,21 @@ public:
         const std::string& reason1 = "Transfer",
         const std::string& reason2 = "",
         const std::string& reason3 = ""
+    );
+
+    /**
+     * @brief 获取指定货币类型的金币排行榜数据
+     *
+     * 查询 player_balances 表，按金额降序排列。
+     * @param currencyType 货币类型
+     * @param limit 返回的最大记录数
+     * @param offset 查询结果的偏移量
+     * @return std::vector<std::pair<std::string, int64_t>> 包含 UUID 和余额（整数，实际金额 * 100）的列表
+     */
+    std::vector<std::pair<std::string, int64_t>> getTopBalances(
+        const std::string& currencyType,
+        size_t limit = 10,
+        size_t offset = 0
     );
 
 private:

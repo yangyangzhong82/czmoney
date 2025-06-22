@@ -5,6 +5,7 @@
 #include "ll/api/command/SoftEnum.h" // 新增: 包含 SoftEnum
 #include <string>
 #include <cstdint> // for int64_t
+#include "czmoney/ui/rank.h" // 新增: 包含排行榜表单头文件
 
 namespace czmoney {
 
@@ -88,6 +89,14 @@ struct MoneyPayOfflineArgs {
     std::string             playerName;     // 目标玩家名称 (收款人)
     float                   amount;         // 转账金额
     ll::command::SoftEnum<CurrencyTypeEnum> currencyType;   // 货币类型 (可选)
+};
+
+// 新增：用于查看排行榜
+struct MoneyRankArgs {
+    ll::command::SoftEnum<CurrencyTypeEnum> currencyType; // 可选的货币类型
+    // 可以考虑添加分页参数
+    // int page = 1;
+    // int count = 10;
 };
 
 

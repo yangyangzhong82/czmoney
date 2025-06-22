@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <vector>      // 用于返回多个条目
+#include <utility> // For std::pair
 
 // 定义导出/导入宏
 // 当编译 czmoney 插件本身时，应定义 CZMONEY_API_EXPORTS
@@ -26,23 +27,22 @@
 #endif
 
 namespace czmoney {
-// 前向声明或包含 TransactionLogEntry 定义
-// 如果在多个地方使用，最好放在一个共享的头文件中
-// 这里为了简单起见，直接定义在 API 头文件中
-struct TransactionLogEntry {
-    int64_t            id;
-    std::string        timestamp; // 使用字符串存储从数据库获取的时间戳
-    std::string        uuid;
-    std::string        currencyType;
-    double             changeAmount;   // API 返回 double (元)
-    double             previousAmount; // API 返回 double (元)
-    std::optional<std::string> reason1; // 使用 optional 处理可能为 NULL 的字段
-    std::optional<std::string> reason2;
-    std::optional<std::string> reason3;
-};
+// 前向声明 TransactionLogEntry，其定义现在位于 money.h 中
+struct TransactionLogEntry;
 } // namespace czmoney
 
 namespace czmoney::api {
+
+// 定义 API 操作结果的枚举
+enum class MoneyApiResult {
+    Success = 0,
+    AccountNotFound,            // 账户不存在
+    InvalidAmount,              // 无效金额 (例如 NaN, Infinity, 负数用于增加/减少, 超出范围)
+    InsufficientBalance,        // 余额不足
+    DatabaseError,              // 数据库操作失败
+    MoneyManagerNotAvailable,   // MoneyManager 实例不可用 (插件未启用或初始化失败)
+    UnknownError                // 未知错误
+};
 
 /**
  * @brief 获取玩家指定货币类型的余额 (浮点数形式，实际金额)
@@ -92,9 +92,9 @@ CZMONEY_API int64_t getRawPlayerBalanceOrInit(std::string_view uuid, std::string
  * @param reason1 可选的操作理由 1 (例如，插件名称)
  * @param reason2 可选的操作理由 2
  * @param reason3 可选的操作理由 3
- * @return bool 操作是否成功 (包括金额有效性检查以及是否低于配置的最低余额)
+ * @return MoneyApiResult 操作结果
  */
-CZMONEY_API bool setPlayerBalance(
+CZMONEY_API MoneyApiResult setPlayerBalance(
     std::string_view uuid,
     std::string_view currencyType,
     double           amount,
@@ -113,9 +113,9 @@ CZMONEY_API bool setPlayerBalance(
  * @param reason1 可选的操作理由 1
  * @param reason2 可选的操作理由 2
  * @param reason3 可选的操作理由 3
- * @return bool 操作是否成功 (包括金额有效性检查)
+ * @return MoneyApiResult 操作结果
  */
-CZMONEY_API bool addPlayerBalance(
+CZMONEY_API MoneyApiResult addPlayerBalance(
     std::string_view uuid,
     std::string_view currencyType,
     double           amountToAdd,
@@ -134,9 +134,9 @@ CZMONEY_API bool addPlayerBalance(
  * @param reason1 可选的操作理由 1
  * @param reason2 可选的操作理由 2
  * @param reason3 可选的操作理由 3
- * @return bool 如果操作成功（账户存在、余额足够且操作后不低于配置的最低余额）则返回 true，否则返回 false (包括金额有效性检查)
+ * @return MoneyApiResult 操作结果
  */
-CZMONEY_API bool subtractPlayerBalance(
+CZMONEY_API MoneyApiResult subtractPlayerBalance(
     std::string_view uuid,
     std::string_view currencyType,
     double           amountToSubtract,
@@ -183,7 +183,7 @@ CZMONEY_API std::optional<int64_t> parseBalance(std::string_view formattedAmount
  * @param ascendingOrder 是否按时间升序排序 (默认为 false，即降序)
  * @return std::vector<TransactionLogEntry> 包含符合条件的流水记录列表。查询失败或无结果时返回空列表。
  */
-CZMONEY_API std::vector<TransactionLogEntry> queryTransactionLogs(
+CZMONEY_API std::vector<czmoney::TransactionLogEntry> queryTransactionLogs(
     std::optional<std::string_view> uuidFilter = std::nullopt,
     std::optional<std::string_view> currencyTypeFilter = std::nullopt,
     std::optional<std::string_view> startTimeFilter = std::nullopt,
@@ -207,9 +207,9 @@ CZMONEY_API std::vector<TransactionLogEntry> queryTransactionLogs(
  * @param reason1 可选的操作理由 1 (例如 "Transfer")
  * @param reason2 可选的操作理由 2 (例如 发起者名称)
  * @param reason3 可选的操作理由 3 (例如 接收者名称)
- * @return bool 操作是否成功 (例如，发送方余额不足、接收方账户问题、金额无效等会导致失败)
+ * @return MoneyApiResult 操作结果
  */
-CZMONEY_API bool transferBalance(
+CZMONEY_API MoneyApiResult transferBalance(
     std::string_view senderUuid,
     std::string_view receiverUuid,
     std::string_view currencyType,
@@ -217,6 +217,21 @@ CZMONEY_API bool transferBalance(
     std::string_view reason1 = "Transfer",
     std::string_view reason2 = "",
     std::string_view reason3 = ""
+);
+
+/**
+ * @brief 获取指定货币类型的金币排行榜数据
+ *
+ * 查询 player_balances 表，按金额降序排列。
+ * @param currencyType 货币类型
+ * @param limit 返回的最大记录数
+ * @param offset 查询结果的偏移量
+ * @return std::vector<std::pair<std::string, int64_t>> 包含 UUID 和余额（整数，实际金额 * 100）的列表
+ */
+CZMONEY_API std::vector<std::pair<std::string, int64_t>> getTopBalances(
+    std::string_view currencyType,
+    size_t limit = 10,
+    size_t offset = 0
 );
 
 

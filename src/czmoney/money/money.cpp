@@ -1,6 +1,6 @@
 #include "czmoney/money/money.h"
 #include "czmoney/database_interface.h" // 包含数据库接口
-#include "czmoney/money/money_api.h"    // 包含 API 头文件以获取 TransactionLogEntry 定义
+// #include "czmoney/money/money_api.h"    // TransactionLogEntry 定义已移至 money.h
 #include "ll/api/memory/Hook.h"
 #include "ll/api/mod/NativeMod.h"
 
@@ -1109,6 +1109,78 @@ bool czmoney::MoneyManager::transferBalance(
         return false;
     }
     // --- 事务结束 ---
+}
+
+// 新增：获取金币排行榜数据实现
+std::vector<std::pair<std::string, int64_t>> czmoney::MoneyManager::getTopBalances(
+    const std::string& currencyType,
+    size_t limit,
+    size_t offset
+) {
+    std::vector<std::pair<std::string, int64_t>> results;
+    if (!mDbConnection.isConnected()) {
+        mLogger.error("无法获取排行榜：数据库未连接。");
+        return results;
+    }
+
+    std::string sql;
+    std::string dbType = mDbConnection.getDbType();
+    db::DbParams params;
+    int paramCounter = 0; // 用于 PostgreSQL 的 $1, $2 占位符
+
+    auto getPlaceholder = [&]() -> std::string {
+        if (dbType == "postgresql") {
+            paramCounter++;
+            return "$" + std::to_string(paramCounter);
+        }
+        return "?"; // 默认使用 ?
+    };
+
+    // 构建 SQL 查询
+    sql = "SELECT uuid, amount FROM player_balances WHERE currency_type = " + getPlaceholder() +
+          " ORDER BY amount DESC"; // 按金额降序排列
+    params.emplace_back(currencyType);
+
+    if (limit > 0) {
+        sql += " LIMIT " + getPlaceholder();
+        params.emplace_back(static_cast<int64_t>(limit)); // LIMIT 参数
+        if (offset > 0) {
+            sql += " OFFSET " + getPlaceholder();
+            params.emplace_back(static_cast<int64_t>(offset)); // OFFSET 参数
+        }
+    }
+    sql += ";";
+
+    mLogger.debug("Executing prepared SQL for getTopBalances: {}", sql);
+    mLogger.debug("  Params: [CurrencyType={}, Limit={}, Offset={}]", currencyType, limit, offset);
+
+    try {
+        db::DbResult queryResult = mDbConnection.queryPrepared(sql, params);
+
+        results.reserve(queryResult.size());
+        for (const auto& row : queryResult) {
+            if (row.size() != 2) { // 期望 2 列: uuid, amount
+                mLogger.error("查询排行榜返回了列数不匹配的行 (预期 2, 实际 {})", row.size());
+                continue;
+            }
+
+            try {
+                std::string uuid = std::get<std::string>(row[0]);
+                int64_t amount = std::get<int64_t>(row[1]); // 余额是 int64_t (分)
+                results.emplace_back(uuid, amount);
+            } catch (const std::bad_variant_access& e) {
+                mLogger.error("处理排行榜记录时类型转换失败: {}", e.what());
+            } catch (const std::exception& e) {
+                mLogger.error("处理排行榜记录时发生意外错误: {}", e.what());
+            }
+        }
+    } catch (const db::DatabaseException& e) {
+        mLogger.error("查询排行榜时发生数据库错误: {}", e.what());
+    } catch (const std::exception& e) {
+        mLogger.error("查询排行榜时发生意外错误: {}", e.what());
+    }
+
+    return results;
 }
 
 

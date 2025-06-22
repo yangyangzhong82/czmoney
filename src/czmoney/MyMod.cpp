@@ -1,7 +1,8 @@
 #include "czmoney/MyMod.h"
-#include "czmoney/command.h" // 包含 command.h
+#include "czmoney/command/command.h" // 包含 command.h
 #include "czmoney/money/money.h"
 #include "czmoney/money/money_api.h"
+#include "czmoney/money/initmoney.h" // 包含 initmoney.h
 #include "ll/api/Config.h"
 #include "ll/api/io/Logger.h"
 #include "ll/api/mod/RegisterHelper.h"
@@ -54,8 +55,8 @@ bool MyMod::enable() {
     auto& logger = getSelf().getLogger();
     logger.debug("Enabling...");
 
-    // --- 数据库连接 ---
-    try {
+        // --- 数据库连接 ---
+        try {
         const auto& cfg = getConfig();
         logger.info("Selected database type: {}", cfg.db_type);
 
@@ -106,6 +107,11 @@ bool MyMod::enable() {
             if (mMoneyManager->initializeTable()) {
                 logger.info("Money database table initialized successfully.");
 
+                // --- 初始化玩家经济监听器 ---
+                logger.info("Initializing player money event listener...");
+                czmoney::initMoney(); // 调用 initMoney 函数来注册事件监听器
+                logger.info("Player money event listener initialized.");
+
                 // --- 注册命令 ---
                 logger.info("Registering money commands...");
                 registerMoneyCommands(getConfig().commandAliases);
@@ -146,7 +152,7 @@ bool MyMod::enable() {
                     std::function<bool(std::string, std::string, double, std::string, std::string, std::string)>(
                         [](std::string uuid, std::string currencyType, double amount,
                            std::string r1, std::string r2, std::string r3) -> bool {
-                            return ::czmoney::api::setPlayerBalance(uuid, currencyType, amount, r1, r2, r3);
+                            return ::czmoney::api::setPlayerBalance(uuid, currencyType, amount, r1, r2, r3) == ::czmoney::api::MoneyApiResult::Success; // 修改这里
                         }
                     )
                 );
@@ -154,7 +160,7 @@ bool MyMod::enable() {
                     std::function<bool(std::string, std::string, double, std::string, std::string, std::string)>(
                         [](std::string uuid, std::string currencyType, double amount,
                            std::string r1, std::string r2, std::string r3) -> bool {
-                            return ::czmoney::api::addPlayerBalance(uuid, currencyType, amount, r1, r2, r3);
+                            return ::czmoney::api::addPlayerBalance(uuid, currencyType, amount, r1, r2, r3) == ::czmoney::api::MoneyApiResult::Success; // 修改这里
                         }
                     )
                 );
@@ -162,7 +168,7 @@ bool MyMod::enable() {
                     std::function<bool(std::string, std::string, double, std::string, std::string, std::string)>(
                         [](std::string uuid, std::string currencyType, double amount,
                            std::string r1, std::string r2, std::string r3) -> bool {
-                            return ::czmoney::api::subtractPlayerBalance(uuid, currencyType, amount, r1, r2, r3);
+                            return ::czmoney::api::subtractPlayerBalance(uuid, currencyType, amount, r1, r2, r3) == ::czmoney::api::MoneyApiResult::Success; // 修改这里
                         }
                     )
                 );
@@ -192,7 +198,7 @@ bool MyMod::enable() {
                     std::function<bool(std::string, std::string, std::string, double, std::string, std::string, std::string)>(
                         [](std::string sender, std::string receiver, std::string currencyType, double amount,
                            std::string r1, std::string r2, std::string r3) -> bool {
-                            return ::czmoney::api::transferBalance(sender, receiver, currencyType, amount, r1, r2, r3);
+                            return ::czmoney::api::transferBalance(sender, receiver, currencyType, amount, r1, r2, r3) == ::czmoney::api::MoneyApiResult::Success; // 修改这里
                         }
                     )
                 );
