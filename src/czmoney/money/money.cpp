@@ -1,20 +1,25 @@
 #include "czmoney/money/money.h"
 #include "czmoney/database_interface.h" // 包含数据库接口
 // #include "czmoney/money/money_api.h"    // TransactionLogEntry 定义已移至 money.h
+#include "czmoney/event/AddMoneyEvent.h"
+#include "czmoney/event/SetMoneyEvent.h"
+#include "czmoney/event/SubtractMoneyEvent.h"
+#include "czmoney/event/TransferMoneyEvent.h" // 新增：转账事件头文件
+#include "ll/api/event/EventBus.h"
 #include "ll/api/memory/Hook.h"
 #include "ll/api/mod/NativeMod.h"
-
-// #include <mysql.h> // 不再直接需要 MySQL 头文件
-#include <stdexcept>
-#include <vector>
-#include <string>
-#include <variant> // 用于处理 DbValue
-#include <sstream>
+#include <cmath>
 #include <iomanip>
 #include <limits>
-#include <cmath>
-#include <utility> // For std::move
+#include <sstream>
+#include <stdexcept>
+#include <string>
 #include <typeinfo> // For typeid in error logging
+#include <utility>  // For std::move
+#include <variant>  // 用于处理 DbValue
+#include <vector>
+
+
 
 namespace czmoney {
 
@@ -474,6 +479,28 @@ bool czmoney::MoneyManager::setPlayerBalance(
     const std::string& reason2,
     const std::string& reason3
 ) {
+    // --- 事件准备 ---
+    std::string playerUuidForEvent   = uuid;
+    std::string currencyTypeForEvent = currencyType;
+    int64_t     amountForEvent       = amount;
+    std::string reason1ForEvent      = reason1;
+    std::string reason2ForEvent      = reason2;
+    std::string reason3ForEvent      = reason3;
+
+    auto beforeEvent = event::SetMoneyBeforeEvent(
+        playerUuidForEvent,
+        currencyTypeForEvent,
+        amountForEvent,
+        reason1ForEvent,
+        reason2ForEvent,
+        reason3ForEvent
+    );
+    ll::event::EventBus::getInstance().publish(beforeEvent);
+
+    if (beforeEvent.isCancelled()) {
+        mLogger.debug("设置玩家 '{}' 余额的操作被事件取消。", playerUuidForEvent);
+        return false;
+    }
     // 0. 检查货币类型和最低余额
     if (!isCurrencyConfigured(currencyType)) {
         mLogger.error("无法设置余额：货币类型 '{}' 未在配置中定义。", currencyType);
@@ -496,11 +523,11 @@ bool czmoney::MoneyManager::setPlayerBalance(
     // 2. 获取操作前的余额 (用于记录流水)
     // 注意：这里获取 previousBalance 的逻辑保持不变
     int64_t previousBalance = 0;
-    std::optional<int64_t> previousBalanceOpt = getPlayerBalance(uuid, currencyType);
+    std::optional<int64_t> previousBalanceOpt = getPlayerBalance(playerUuidForEvent, currencyTypeForEvent);
     if (previousBalanceOpt.has_value()) {
         previousBalance = previousBalanceOpt.value();
     } else {
-        auto it = mConfig.economy.find(currencyType);
+        auto it = mConfig.economy.find(currencyTypeForEvent);
         if (it != mConfig.economy.end()) {
             std::optional<int64_t> initialBalanceIntOpt = convertDoubleToInt64(
                 it->second.initialBalance, "initialBalance fallback in setPlayerBalance");
@@ -546,7 +573,16 @@ bool czmoney::MoneyManager::setPlayerBalance(
         int affectedRows = mDbConnection.executePrepared(sql, params);
         // UPSERT 操作的 affectedRows 含义可能不同 (MySQL: 1=INSERT, 2=UPDATE, 0=No change)
         // 这里我们假设 >= 0 表示操作本身成功
-
+        // --- 发布 AfterEvent ---
+        auto afterEvent = event::SetMoneyAfterEvent(
+            playerUuidForEvent,
+            currencyTypeForEvent,
+            amountForEvent,
+            reason1ForEvent,
+            reason2ForEvent,
+            reason3ForEvent
+        );
+        ll::event::EventBus::getInstance().publish(afterEvent);
         // 5. 记录流水
         int64_t changeAmount = amount - previousBalance;
         if (changeAmount != 0) {
@@ -580,36 +616,68 @@ bool czmoney::MoneyManager::addPlayerBalance(
     const std::string& reason2,
     const std::string& reason3
 ) {
-    // 0. 检查货币类型和金额
+    // 0. 检查货币类型和金额 (保持不变)
     if (!isCurrencyConfigured(currencyType)) {
         mLogger.error("无法增加余额：货币类型 '{}' 未在配置中定义。", currencyType);
         return false;
     }
     if (amountToAdd <= 0) {
-        mLogger.warn("尝试为 UUID: {}, Currency: {} 增加非正数金额 ({})", uuid, currencyType, formatBalance(amountToAdd));
+        mLogger
+            .warn("尝试为 UUID: {}, Currency: {} 增加非正数金额 ({})", uuid, currencyType, formatBalance(amountToAdd));
         return amountToAdd == 0; // 增加 0 视为成功
     }
 
-    // 1. 检查数据库连接
+    // <<< --- 事件发布准备 --- >>>
+    // 创建可修改的局部变量，用于传递给事件
+    std::string playerUuidForEvent   = uuid;
+    std::string currencyTypeForEvent = currencyType;
+    int64_t     amountToAddForEvent  = amountToAdd;
+    std::string reason1ForEvent      = reason1;
+    std::string reason2ForEvent      = reason2;
+    std::string reason3ForEvent      = reason3;
+
+    // <<< --- 发布 BeforeEvent --- >>>
+    auto beforeEvent = czmoney::event::AddMoneyBeforeEvent(
+        playerUuidForEvent,
+        currencyTypeForEvent,
+        amountToAddForEvent,
+        reason1ForEvent,
+        reason2ForEvent,
+        reason3ForEvent
+    );
+    ll::event::EventBus::getInstance().publish(beforeEvent);
+
+    // <<< --- 检查事件是否被取消 --- >>>
+    if (beforeEvent.isCancelled()) {
+        mLogger.debug(
+            "为玩家 '{}' 增加 '{}' {} 的操作被事件监听器取消。",
+            playerUuidForEvent,
+            formatBalance(amountToAddForEvent),
+            currencyTypeForEvent
+        );
+        return false; // 操作被取消，直接返回
+    }
+    // <<< --- 事件处理结束 --- >>>
+
+
+    // 1. 检查数据库连接 (保持不变)
     if (!mDbConnection.isConnected()) {
         mLogger.error("无法增加余额：数据库未连接。");
         return false;
     }
 
-    // --- 事务考虑 ---
-    // 单个 UPDATE 通常是原子的，但如果涉及初始化账户，可能需要事务
-    // 这里暂时不显式使用事务，依赖 getPlayerBalanceOrInit 和后续的 UPDATE
-    // 如果 getPlayerBalanceOrInit 内部的 setPlayerBalance 失败，这里会出错
-
     try {
         // 2. 获取当前余额，如果不存在则初始化
-        int64_t currentBalance = getPlayerBalanceOrInit(uuid, currencyType);
+        // <<< 使用事件中可能已修改的数据 >>>
+        int64_t currentBalance = getPlayerBalanceOrInit(playerUuidForEvent, currencyTypeForEvent);
 
         // 3. 检查溢出
-        if (currentBalance > std::numeric_limits<int64_t>::max() - amountToAdd) {
-             mLogger.error("增加余额时检测到潜在溢出。UUID: {}, Currency: {}", uuid, currencyType);
-             return false;
+        // <<< 使用事件中可能已修改的数据 >>>
+        if (currentBalance > std::numeric_limits<int64_t>::max() - amountToAddForEvent) {
+            mLogger.error("增加余额时检测到潜在溢出。UUID: {}, Currency: {}", playerUuidForEvent, currencyTypeForEvent);
+            return false;
         }
+
         // 4. 准备 SQL 和参数 (原子更新)
         std::string sql;
         std::string dbType = mDbConnection.getDbType();
@@ -618,94 +686,78 @@ bool czmoney::MoneyManager::addPlayerBalance(
         } else {
             sql = "UPDATE player_balances SET amount = amount + ? WHERE uuid = ? AND currency_type = ?;";
         }
-        db::DbParams params = {amountToAdd, uuid, currencyType};
+        // <<< 使用事件中可能已修改的数据 >>>
+        db::DbParams params = {amountToAddForEvent, playerUuidForEvent, currencyTypeForEvent};
 
-        // --- 增强日志 ---
-        mLogger.debug("Preparing to execute SQL for addPlayerBalance:");
-        mLogger.debug("  SQL: {}", sql);
-        mLogger.debug("  Params: [AmountToAdd={}, UUID={}, Currency={}]", amountToAdd, uuid, currencyType);
-        // --- 增强日志结束 ---
+        mLogger.debug(
+            "Executing prepared SQL for addPlayerBalance: {} with params: [{}, {}, {}]",
+            sql,
+            amountToAddForEvent,
+            playerUuidForEvent,
+            currencyTypeForEvent
+        );
 
         // 5. 执行更新
-        int affectedRows = -1; // 初始化为无效值
-        try {
-            // --- MORE LOGGING ---
-            // fprintf(stderr, "[czmoney DEBUG] Attempting DB update in addPlayerBalance...\n"); // Removed fprintf
-            mLogger.debug("Attempting DB update in addPlayerBalance..."); // Also log via logger
-            // --- END MORE LOGGING ---
+        int affectedRows = mDbConnection.executePrepared(sql, params);
 
-            affectedRows = mDbConnection.executePrepared(sql, params);
-
-            // --- MORE LOGGING ---
-            // fprintf(stderr, "[czmoney DEBUG] DB update executed. Affected rows: %d\n", affectedRows); // Removed fprintf
-            mLogger.debug("DB update executed. Affected rows: {}", affectedRows); // Also log via logger
-            // --- END MORE LOGGING ---
-
-            // --- 增强日志 ---
-            // mLogger.debug("SQL execution completed for addPlayerBalance. Affected rows: {}", affectedRows); // Redundant with above
-            // --- 增强日志结束 ---
-        } catch (const db::DatabaseException& dbEx) {
-            // 捕获数据库执行本身的异常
-            // --- MORE LOGGING ---
-            // fprintf(stderr, "[czmoney ERROR] DatabaseException during UPDATE: %s\n", dbEx.what()); // Removed fprintf
-            // fprintf(stderr, "[czmoney ERROR]   SQL: %s\n", sql.c_str()); // Removed fprintf
-            // fprintf(stderr, "[czmoney ERROR]   Params: [AmountToAdd=%lld, UUID=%s, Currency=%s]\n", (long long)amountToAdd, uuid.c_str(), currencyType.c_str()); // Removed fprintf
-            // --- END MORE LOGGING ---
-            mLogger.error("Database error during addPlayerBalance UPDATE execution: {}", dbEx.what());
-            mLogger.error("  SQL: {}", sql);
-            mLogger.error("  Params: [AmountToAdd={}, UUID={}, Currency={}]", amountToAdd, uuid, currencyType);
-            return false; // 数据库执行失败
-        } catch (const std::exception& stdEx) {
-            // 捕获其他可能的标准异常
-            // --- MORE LOGGING ---
-            // fprintf(stderr, "[czmoney ERROR] std::exception during UPDATE: %s\n", stdEx.what()); // Removed fprintf
-            // fprintf(stderr, "[czmoney ERROR]   SQL: %s\n", sql.c_str()); // Removed fprintf
-            // fprintf(stderr, "[czmoney ERROR]   Params: [AmountToAdd=%lld, UUID=%s, Currency=%s]\n", (long long)amountToAdd, uuid.c_str(), currencyType.c_str()); // Removed fprintf
-            // --- END MORE LOGGING ---
-            mLogger.error("Unexpected standard error during addPlayerBalance UPDATE execution: {}", stdEx.what());
-            mLogger.error("  SQL: {}", sql);
-            mLogger.error("  Params: [AmountToAdd={}, UUID={}, Currency={}]", amountToAdd, uuid, currencyType);
-            return false; // 其他执行失败
-        } catch (...) { // Catch-all
-             // --- MORE LOGGING ---
-            // fprintf(stderr, "[czmoney FATAL] Unknown exception during UPDATE!\n"); // Removed fprintf
-            // fprintf(stderr, "[czmoney FATAL]   SQL: %s\n", sql.c_str()); // Removed fprintf
-            // fprintf(stderr, "[czmoney FATAL]   Params: [AmountToAdd=%lld, UUID=%s, Currency=%s]\n", (long long)amountToAdd, uuid.c_str(), currencyType.c_str()); // Removed fprintf
-            // --- END MORE LOGGING ---
-            mLogger.fatal("Unknown exception during addPlayerBalance UPDATE execution!"); // Use fatal level
-             mLogger.fatal("  SQL: {}", sql);
-            mLogger.fatal("  Params: [AmountToAdd={}, UUID={}, Currency={}]", amountToAdd, uuid, currencyType);
-            return false; // Unknown failure
-        }
-
-
-        // 检查受影响的行数
         if (affectedRows <= 0) {
-            // 如果没有行受影响，可能意味着账户在 getPlayerBalanceOrInit 之后被删除了？
-            // 或者 UPDATE 由于某种原因失败但未抛出异常 (虽然上面 try-catch 应该捕获了)
-            mLogger.error("AddPlayerBalance UPDATE operation affected {} rows (expected 1). UUID: {}, Currency: {}",
-                          affectedRows, uuid, currencyType);
-            // 检查账户是否仍然存在
-            if (!hasAccount(uuid, currencyType)) {
-                 mLogger.error(" - Account seems to have disappeared during the add balance operation.");
+            mLogger.error(
+                "AddPlayerBalance UPDATE operation affected {} rows (expected 1). UUID: {}, Currency: {}",
+                affectedRows,
+                playerUuidForEvent,
+                currencyTypeForEvent
+            );
+            if (!hasAccount(playerUuidForEvent, currencyTypeForEvent)) {
+                mLogger.error(" - Account seems to have disappeared during the add balance operation.");
             }
             return false; // 更新逻辑失败
         }
 
         // 6. 记录流水
-        if (!logTransaction(uuid, currencyType, amountToAdd, currentBalance, reason1, reason2, reason3)) {
-            mLogger.error("数据库余额已更新，但记录流水失败！(增加余额) UUID: {}, Currency: {}", uuid, currencyType);
-            // 考虑是否需要回滚或采取其他措施
+        // <<< 使用事件中可能已修改的数据 >>>
+        if (!logTransaction(
+                playerUuidForEvent,
+                currencyTypeForEvent,
+                amountToAddForEvent,
+                currentBalance,
+                reason1ForEvent,
+                reason2ForEvent,
+                reason3ForEvent
+            )) {
+            mLogger.error(
+                "数据库余额已更新，但记录流水失败！(增加余额) UUID: {}, Currency: {}",
+                playerUuidForEvent,
+                currencyTypeForEvent
+            );
         }
 
-        mLogger.debug("成功为 UUID: {}, Currency: {} 增加余额 {}, 当前余额: {}", uuid, currencyType, formatBalance(amountToAdd), formatBalance(currentBalance + amountToAdd));
+        // <<< --- 发布 AfterEvent --- >>>
+        auto afterEvent = czmoney::event::AddMoneyAfterEvent(
+            playerUuidForEvent,
+            currencyTypeForEvent,
+            amountToAddForEvent,
+            reason1ForEvent,
+            reason2ForEvent,
+            reason3ForEvent
+        );
+        ll::event::EventBus::getInstance().publish(afterEvent);
+        // <<< --- AfterEvent 发布结束 --- >>>
+
+
+        mLogger.debug(
+            "成功为 UUID: {}, Currency: {} 增加余额 {}, 当前余额: {}",
+            playerUuidForEvent,
+            currencyTypeForEvent,
+            formatBalance(amountToAddForEvent),
+            formatBalance(currentBalance + amountToAddForEvent)
+        );
         return true;
 
-    } catch (const db::DatabaseException& e) { // 主要捕获 getPlayerBalanceOrInit 或 hasAccount 中的数据库错误
-         mLogger.error("Database error during addPlayerBalance (outside UPDATE execution): {}", e.what());
-         return false;
     } catch (const std::runtime_error& e) { // Catch getPlayerBalanceOrInit exception
         mLogger.error("Runtime error during addPlayerBalance (likely from getPlayerBalanceOrInit): {}", e.what());
+        return false;
+    } catch (const db::DatabaseException& e) { // 主要捕获 getPlayerBalanceOrInit 或 hasAccount 中的数据库错误
+        mLogger.error("Database error during addPlayerBalance (outside UPDATE execution): {}", e.what());
         return false;
     } catch (const std::exception& e) { // 捕获其他未预料的异常
         mLogger.error("Unexpected standard error during addPlayerBalance: {}", e.what());
@@ -737,7 +789,29 @@ bool czmoney::MoneyManager::subtractPlayerBalance(
         mLogger.error("无法减少余额：数据库未连接。");
         return false;
     }
+    // --- 事件准备 ---
+    std::string playerUuidForEvent       = uuid;
+    std::string currencyTypeForEvent     = currencyType;
+    int64_t     amountToSubtractForEvent = amountToSubtract;
+    std::string reason1ForEvent          = reason1;
+    std::string reason2ForEvent          = reason2;
+    std::string reason3ForEvent          = reason3;
 
+    auto beforeEvent = event::SubtractMoneyBeforeEvent(
+        playerUuidForEvent,
+        currencyTypeForEvent,
+        amountToSubtractForEvent,
+        reason1ForEvent,
+        reason2ForEvent,
+        reason3ForEvent
+    );
+    ll::event::EventBus::getInstance().publish(beforeEvent);
+
+    if (beforeEvent.isCancelled()) {
+        mLogger.debug("减少玩家 '{}' 余额的操作被事件取消。", playerUuidForEvent);
+        return false;
+    }
+    // --- 事件结束 ---
     // --- 事务考虑 ---
     // 单个 UPDATE 通常是原子的
 
@@ -816,7 +890,17 @@ bool czmoney::MoneyManager::subtractPlayerBalance(
             mLogger.error("数据库余额已更新，但记录流水失败！(减少余额) UUID: {}, Currency: {}", uuid, currencyType);
             // 考虑是否需要回滚或采取其他措施
         }
-
+        // --- 发布 AfterEvent ---
+        auto afterEvent = event::SubtractMoneyAfterEvent(
+            playerUuidForEvent,
+            currencyTypeForEvent,
+            amountToSubtractForEvent,
+            reason1ForEvent,
+            reason2ForEvent,
+            reason3ForEvent
+        );
+        ll::event::EventBus::getInstance().publish(afterEvent);
+        // --- AfterEvent 结束 ---
         mLogger.debug("成功为 UUID: {}, Currency: {} 减少余额 {}, 当前余额: {}", uuid, currencyType, formatBalance(amountToSubtract), formatBalance(currentBalance - amountToSubtract));
         return true;
 
@@ -1026,69 +1110,114 @@ bool czmoney::MoneyManager::transferBalance(
         return false;
     }
 
-    // --- 计算税费和实际到账金额 ---
-    double taxRate = currencyConf.transferTaxRate;
-    int64_t taxAmount = 0;
-    int64_t amountReceived = amountToTransfer; // 默认等于转账金额
+    // --- 事件准备 ---
+    std::string senderUuidForEvent       = senderUuid;
+    std::string receiverUuidForEvent     = receiverUuid;
+    std::string currencyTypeForEvent     = currencyType;
+    int64_t     amountToTransferForEvent = amountToTransfer;
+    int64_t     taxAmountForEvent        = 0;
+    int64_t     amountReceivedForEvent   = amountToTransfer;
+    std::string reason1ForEvent          = reason1;
+    std::string reason2ForEvent          = reason2;
+    std::string reason3ForEvent          = reason3;
 
-    if (taxRate > 0.0) { // 只有税率大于 0 才计算
-        if (taxRate < 0.0 || taxRate > 1.0) { // 验证税率范围
+    // --- 计算税费和实际到账金额 (在事件发布前计算，以便事件监听器可以修改) ---
+    double taxRate = currencyConf.transferTaxRate;
+    if (taxRate > 0.0) {
+        if (taxRate < 0.0 || taxRate > 1.0) {
             mLogger.warn("货币类型 '{}' 的转账税率配置无效 ({})，将按 0 处理。", currencyType, taxRate);
             taxRate = 0.0;
         }
-
-        // 计算税费 (基于转账金额)，四舍五入到最近的分
-        double taxAmountDouble = static_cast<double>(amountToTransfer) * taxRate;
-        taxAmount = static_cast<int64_t>(std::round(taxAmountDouble));
-
-        // 确保税费不会导致接收金额小于 0 (虽然理论上 amountToTransfer > 0 且 taxRate <= 1.0 不会发生)
-        if (taxAmount > amountToTransfer) {
-             mLogger.warn("计算出的税费 ({}) 大于转账金额 ({})，税费将被调整为转账金额。", formatBalance(taxAmount), formatBalance(amountToTransfer));
-             taxAmount = amountToTransfer;
+        double taxAmountDouble = static_cast<double>(amountToTransferForEvent) * taxRate;
+        taxAmountForEvent = static_cast<int64_t>(std::round(taxAmountDouble));
+        if (taxAmountForEvent > amountToTransferForEvent) {
+             mLogger.warn("计算出的税费 ({}) 大于转账金额 ({})，税费将被调整为转账金额。", formatBalance(taxAmountForEvent), formatBalance(amountToTransferForEvent));
+             taxAmountForEvent = amountToTransferForEvent;
         }
-
-        amountReceived = amountToTransfer - taxAmount; // 计算接收者实际收到的金额
-        mLogger.debug("转账税计算: Rate={}, Amount={}, Tax={}, Received={}", taxRate, formatBalance(amountToTransfer), formatBalance(taxAmount), formatBalance(amountReceived));
+        amountReceivedForEvent = amountToTransferForEvent - taxAmountForEvent;
+        mLogger.debug("转账税计算 (事件前): Rate={}, Amount={}, Tax={}, Received={}", taxRate, formatBalance(amountToTransferForEvent), formatBalance(taxAmountForEvent), formatBalance(amountReceivedForEvent));
     }
     // --- 税费计算结束 ---
+
+    // <<< --- 发布 BeforeEvent --- >>>
+    auto beforeEvent = czmoney::event::TransferMoneyBeforeEvent(
+        senderUuidForEvent,
+        receiverUuidForEvent,
+        currencyTypeForEvent,
+        amountToTransferForEvent,
+        taxAmountForEvent,
+        amountReceivedForEvent,
+        reason1ForEvent,
+        reason2ForEvent,
+        reason3ForEvent
+    );
+    ll::event::EventBus::getInstance().publish(beforeEvent);
+
+    // <<< --- 检查事件是否被取消 --- >>>
+    if (beforeEvent.isCancelled()) {
+        mLogger.debug(
+            "玩家 '{}' 向 '{}' 转账 '{}' {} 的操作被事件监听器取消。",
+            senderUuidForEvent,
+            receiverUuidForEvent,
+            formatBalance(amountToTransferForEvent),
+            currencyTypeForEvent
+        );
+        return false; // 操作被取消，直接返回
+    }
+    // <<< --- 事件处理结束 --- >>>
 
     // --- 数据库事务 ---
     try {
         mDbConnection.beginTransaction(); // 开始事务
 
-        // 1. 尝试从发送方扣款
-        // 注意：内部不再需要手动回滚，事务会处理
-        std::string subtractReason1 = reason1;
-        std::string subtractReason2 = fmt::format("To: {}", reason3.empty() ? receiverUuid : reason3);
-        std::string subtractReason3 = fmt::format("Amount: {}, Tax: {}", formatBalance(amountToTransfer), formatBalance(taxAmount));
+        // 1. 尝试从发送方扣款 (使用事件中可能已修改的数据)
+        std::string subtractReason1 = reason1ForEvent;
+        std::string subtractReason2 = fmt::format("To: {}", reason3ForEvent.empty() ? receiverUuidForEvent : reason3ForEvent);
+        std::string subtractReason3 = fmt::format("Amount: {}, Tax: {}", formatBalance(amountToTransferForEvent), formatBalance(taxAmountForEvent));
 
-        if (!subtractPlayerBalance(senderUuid, currencyType, amountToTransfer, subtractReason1, subtractReason2, subtractReason3)) {
-            mLogger.warn("转账失败：无法从发送方 {} 扣除 {} (可能是余额不足或账户问题)", senderUuid, formatBalance(amountToTransfer));
+        if (!subtractPlayerBalance(senderUuidForEvent, currencyTypeForEvent, amountToTransferForEvent, subtractReason1, subtractReason2, subtractReason3)) {
+            mLogger.warn("转账失败：无法从发送方 {} 扣除 {} (可能是余额不足或账户问题)", senderUuidForEvent, formatBalance(amountToTransferForEvent));
             mDbConnection.rollbackTransaction(); // 回滚事务
             return false;
         }
 
-        // 2. 尝试给接收方加款 (如果需要)
-        if (amountReceived > 0) {
-            std::string addReason1 = reason1;
-            std::string addReason2 = fmt::format("From: {}", reason2.empty() ? senderUuid : reason2);
-            std::string addReason3 = fmt::format("Received: {}, Original: {}, Tax: {}", formatBalance(amountReceived), formatBalance(amountToTransfer), formatBalance(taxAmount));
+        // 2. 尝试给接收方加款 (如果需要，使用事件中可能已修改的数据)
+        if (amountReceivedForEvent > 0) {
+            std::string addReason1 = reason1ForEvent;
+            std::string addReason2 = fmt::format("From: {}", reason2ForEvent.empty() ? senderUuidForEvent : reason2ForEvent);
+            std::string addReason3 = fmt::format("Received: {}, Original: {}, Tax: {}", formatBalance(amountReceivedForEvent), formatBalance(amountToTransferForEvent), formatBalance(taxAmountForEvent));
 
-            if (!addPlayerBalance(receiverUuid, currencyType, amountReceived, addReason1, addReason2, addReason3)) {
+            if (!addPlayerBalance(receiverUuidForEvent, currencyTypeForEvent, amountReceivedForEvent, addReason1, addReason2, addReason3)) {
                  mLogger.error("转账失败：已从发送方 {} 扣款 {}，但无法为接收方 {} 增加 {}",
-                              senderUuid, formatBalance(amountToTransfer), receiverUuid, formatBalance(amountReceived));
+                              senderUuidForEvent, formatBalance(amountToTransferForEvent), receiverUuidForEvent, formatBalance(amountReceivedForEvent));
                  mDbConnection.rollbackTransaction(); // 回滚事务
                  return false;
             }
         } else {
-             mLogger.info("转账税后接收金额为 0 (或更少)，接收方 {} 余额未增加。税费: {}", receiverUuid, formatBalance(taxAmount));
+             mLogger.info("转账税后接收金额为 0 (或更少)，接收方 {} 余额未增加。税费: {}", receiverUuidForEvent, formatBalance(taxAmountForEvent));
         }
 
         // 3. 所有操作成功，提交事务
         mDbConnection.commitTransaction(); // 提交事务
+
+        // <<< --- 发布 AfterEvent --- >>>
+        auto afterEvent = czmoney::event::TransferMoneyAfterEvent(
+            senderUuidForEvent,
+            receiverUuidForEvent,
+            currencyTypeForEvent,
+            amountToTransferForEvent,
+            taxAmountForEvent,
+            amountReceivedForEvent,
+            reason1ForEvent,
+            reason2ForEvent,
+            reason3ForEvent
+        );
+        ll::event::EventBus::getInstance().publish(afterEvent);
+        // <<< --- AfterEvent 发布结束 --- >>>
+
         mLogger.info("成功转账 {} ({}) 从 {} 到 {} (实收: {}, 税: {})",
-                     formatBalance(amountToTransfer), currencyType, senderUuid, receiverUuid,
-                     formatBalance(amountReceived), formatBalance(taxAmount));
+                     formatBalance(amountToTransferForEvent), currencyTypeForEvent, senderUuidForEvent, receiverUuidForEvent,
+                     formatBalance(amountReceivedForEvent), formatBalance(taxAmountForEvent));
         return true;
 
     } catch (const db::DatabaseException& e) {

@@ -77,11 +77,12 @@ std::optional<int64_t> convertCommandFloatToInt64(float amount, CommandOutput& o
 
     if (centsDouble < min_representable || centsDouble >= max_representable_plus_one) {
         // 使用更精确的范围提示
-        output.error(fmt::format("金额 '{}' 转换后超出有效范围。有效范围为 [{}, {}]。",
-                                 amount,
-                                 czmoney::api::formatBalance(std::numeric_limits<int64_t>::min()), // 格式化最小值
-                                 czmoney::api::formatBalance(std::numeric_limits<int64_t>::max()) // 格式化最大值
-                                 ));
+        output.error(fmt::format(
+            "金额 '{}' 转换后超出有效范围。有效范围为 [{}, {}]。",
+            amount,
+            czmoney::api::formatBalance(std::numeric_limits<int64_t>::min()), // 格式化最小值
+            czmoney::api::formatBalance(std::numeric_limits<int64_t>::max())  // 格式化最大值
+        ));
         return std::nullopt;
     }
 
@@ -179,7 +180,8 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                     "玩家 {} 的余额 ({}): {}",
                     player->getRealName(),
                     currency,
-                    czmoney::api::formatBalance(static_cast<int64_t>(balance * 100.0)) // API 返回 double，需要转回 int64_t 格式化
+                    czmoney::api::formatBalance(static_cast<int64_t>(balance * 100.0)
+                    ) // API 返回 double，需要转回 int64_t 格式化
                 );
                 sendFeedback(output, feedback, true); // 发送成功反馈
             }
@@ -219,7 +221,8 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 "玩家 {} 的余额 ({}): {}",
                 playerInfo.name, // 使用 PlayerInfo 中的名字
                 currency,
-                czmoney::api::formatBalance(static_cast<int64_t>(balance * 100.0)) // API 返回 double，需要转回 int64_t 格式化
+                czmoney::api::formatBalance(static_cast<int64_t>(balance * 100.0)
+                ) // API 返回 double，需要转回 int64_t 格式化
             );
             sendFeedback(output, feedback, true); // 发送成功反馈
         });
@@ -234,23 +237,33 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
         .execute(
             [](CommandOrigin const& origin, CommandOutput& output, MoneySetSelectorArgs const& args, ::Command const&) {
                 // --- Permission Check ---
-            if (origin.getPermissionsLevel() < CommandPermissionLevel::GameDirectors) {
-                output.error("您没有权限使用此命令。");
-                return;
-            }
-            // --- End Permission Check ---
-            std::string currency    = getTargetCurrencyType(args.currencyType);
-            float       inputAmount = args.amount; // Get the float amount
+                if (origin.getPermissionsLevel() < CommandPermissionLevel::GameDirectors) {
+                    output.error("您没有权限使用此命令。");
+                    return;
+                }
+                // --- End Permission Check ---
 
-            // 使用新的辅助函数转换和验证金额 (允许负数)
-            // API 接受 double，所以这里直接用 float 转换成 double 传递
-            double amountDouble = static_cast<double>(inputAmount);
+                std::string currency    = getTargetCurrencyType(args.currencyType);
+                float       inputAmount = args.amount; // Get the float amount
 
-            auto results = args.target.results(origin);
-            if (results.empty()) {
-                output.error("未找到匹配的玩家。");
-                return;
-            }
+                // API 接受 double，所以这里直接用 float 转换成 double 传递
+                double amountDouble = static_cast<double>(inputAmount);
+
+                auto results = args.target.results(origin);
+                if (results.empty()) {
+                    output.error("未找到匹配的玩家。");
+                    return;
+                }
+
+                // 获取命令执行者的名称作为理由
+                std::string reason2 = "Console"; // 默认理由为控制台
+                if (origin.getOriginType() == CommandOriginType::Player) {
+                    Actor* actor = origin.getEntity();
+                    if (actor && actor->isPlayer()) {
+                        Player* playerOrigin = static_cast<Player*>(actor);
+                        reason2              = playerOrigin->getRealName(); // 如果是玩家，则获取玩家名称
+                    }
+                }
 
                 int successCount = 0;
                 int failCount    = 0;
@@ -263,7 +276,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                     // 添加理由
                     std::string                  reason1 = "Command: cmoney set";
                     czmoney::api::MoneyApiResult result =
-                        czmoney::api::setPlayerBalance(uuidStr, currency, amountDouble, reason1); // 调用 API
+                        czmoney::api::setPlayerBalance(uuidStr, currency, amountDouble, reason1, reason2); // 调用 API
                     if (result == czmoney::api::MoneyApiResult::Success) {
                         successCount++;
                     } else {
@@ -307,9 +320,11 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
         .required("playerName")
         .required("amount")
         .optional("currencyType")
-        .execute(
-            [](CommandOrigin const& origin, CommandOutput& output, MoneySetOfflineArgs const& args, ::Command const&) {
-                // --- Permission Check ---
+        .execute([](CommandOrigin const&       origin,
+                    CommandOutput&             output,
+                    MoneySetOfflineArgs const& args,
+                    ::Command const&) {
+            // --- Permission Check ---
             if (origin.getPermissionsLevel() < CommandPermissionLevel::GameDirectors) {
                 output.error("您没有权限使用此命令。");
                 return;
@@ -325,55 +340,50 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 output.error(fmt::format("未找到玩家 '{}'。", args.playerName));
                 return;
             }
-                const auto& playerInfo = playerInfoOpt.value();
-                std::string uuidStr    = playerInfo.uuid.asString();
+            const auto& playerInfo = playerInfoOpt.value();
+            std::string uuidStr    = playerInfo.uuid.asString();
 
-                // Set balance with reason
-                std::string                  reason1 = "Command: cmoney set";
-                czmoney::api::MoneyApiResult result =
-                    czmoney::api::setPlayerBalance(uuidStr, currency, amountDouble, reason1); // 调用 API
-                if (result == czmoney::api::MoneyApiResult::Success) {
-                    sendFeedback(
-                        output,
-                        fmt::format(
-                            "成功将玩家 {} 的余额 ({}) 设置为 {}.",
-                            playerInfo.name,
-                            currency,
-                            czmoney::api::formatBalance(static_cast<int64_t>(amountDouble * 100.0))
-                        ),
-                        true
-                    ); // Corrected: Use API for formatBalance
-                } else {
-                    std::string errorMessage;
-                    switch (result) {
-                    case czmoney::api::MoneyApiResult::InvalidAmount:
-                        errorMessage = "无效金额。";
-                        break;
-                    case czmoney::api::MoneyApiResult::DatabaseError:
-                        errorMessage = "数据库操作失败。";
-                        break;
-                    case czmoney::api::MoneyApiResult::MoneyManagerNotAvailable:
-                        errorMessage = "经济系统不可用。";
-                        break;
-                    case czmoney::api::MoneyApiResult::AccountNotFound:
-                    case czmoney::api::MoneyApiResult::InsufficientBalance:
-                    case czmoney::api::MoneyApiResult::UnknownError:
-                    default:
-                        errorMessage = "未知错误。";
-                        break;
-                    }
-                    sendFeedback(
-                        output,
-                        fmt::format(
-                            "为玩家 {} 设置余额失败：{}。请查看日志获取详细信息。",
-                            playerInfo.name,
-                            errorMessage
-                        ),
-                        false
-                    );
+            // Set balance with reason
+            std::string                  reason1 = "Command: cmoney set";
+            czmoney::api::MoneyApiResult result =
+                czmoney::api::setPlayerBalance(uuidStr, currency, amountDouble, reason1); // 调用 API
+            if (result == czmoney::api::MoneyApiResult::Success) {
+                sendFeedback(
+                    output,
+                    fmt::format(
+                        "成功将玩家 {} 的余额 ({}) 设置为 {}.",
+                        playerInfo.name,
+                        currency,
+                        czmoney::api::formatBalance(static_cast<int64_t>(amountDouble * 100.0))
+                    ),
+                    true
+                ); // Corrected: Use API for formatBalance
+            } else {
+                std::string errorMessage;
+                switch (result) {
+                case czmoney::api::MoneyApiResult::InvalidAmount:
+                    errorMessage = "无效金额。";
+                    break;
+                case czmoney::api::MoneyApiResult::DatabaseError:
+                    errorMessage = "数据库操作失败。";
+                    break;
+                case czmoney::api::MoneyApiResult::MoneyManagerNotAvailable:
+                    errorMessage = "经济系统不可用。";
+                    break;
+                case czmoney::api::MoneyApiResult::AccountNotFound:
+                case czmoney::api::MoneyApiResult::InsufficientBalance:
+                case czmoney::api::MoneyApiResult::UnknownError:
+                default:
+                    errorMessage = "未知错误。";
+                    break;
                 }
+                sendFeedback(
+                    output,
+                    fmt::format("为玩家 {} 设置余额失败：{}。请查看日志获取详细信息。", playerInfo.name, errorMessage),
+                    false
+                );
             }
-        );
+        });
 
     // 3. money add <target> <amount> [currencyType] - 增加在线玩家余额
     moneyCommand.overload<MoneyAddSelectorArgs>()
@@ -384,20 +394,30 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
         .execute(
             [](CommandOrigin const& origin, CommandOutput& output, MoneyAddSelectorArgs const& args, ::Command const&) {
                 // --- Permission Check ---
-            if (origin.getPermissionsLevel() < CommandPermissionLevel::GameDirectors) {
-                output.error("您没有权限使用此命令。");
-                return;
-            }
-            // --- End Permission Check ---
-            std::string currency     = getTargetCurrencyType(args.currencyType);
-            float       inputAmount  = args.amount; // Get the float amount
-            double      amountDouble = static_cast<double>(inputAmount);
+                if (origin.getPermissionsLevel() < CommandPermissionLevel::GameDirectors) {
+                    output.error("您没有权限使用此命令。");
+                    return;
+                }
+                // --- End Permission Check ---
+                std::string currency     = getTargetCurrencyType(args.currencyType);
+                float       inputAmount  = args.amount; // Get the float amount
+                double      amountDouble = static_cast<double>(inputAmount);
 
-            auto results = args.target.results(origin);
-            if (results.empty()) {
-                output.error("未找到匹配的玩家。");
-                return;
-            }
+                auto results = args.target.results(origin);
+                if (results.empty()) {
+                    output.error("未找到匹配的玩家。");
+                    return;
+                }
+
+                // 获取命令执行者的名称作为理由
+                std::string reason2 = "Console"; // 默认理由为控制台
+                if (origin.getOriginType() == CommandOriginType::Player) {
+                    Actor* actor = origin.getEntity();
+                    if (actor && actor->isPlayer()) {
+                        Player* playerOrigin = static_cast<Player*>(actor);
+                        reason2              = playerOrigin->getRealName(); // 如果是玩家，则获取玩家名称
+                    }
+                }
 
                 int successCount = 0;
                 int failCount    = 0;
@@ -410,7 +430,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                     // 添加理由
                     std::string                  reason1 = "Command: cmoney add";
                     czmoney::api::MoneyApiResult result =
-                        czmoney::api::addPlayerBalance(uuidStr, currency, amountDouble, reason1); // 调用 API
+                        czmoney::api::addPlayerBalance(uuidStr, currency, amountDouble, reason1, reason2); // 调用 API
                     if (result == czmoney::api::MoneyApiResult::Success) {
                         successCount++;
                     } else {
@@ -454,9 +474,11 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
         .required("playerName")
         .required("amount")
         .optional("currencyType")
-        .execute(
-            [](CommandOrigin const& origin, CommandOutput& output, MoneyAddOfflineArgs const& args, ::Command const&) {
-                // --- Permission Check ---
+        .execute([](CommandOrigin const&       origin,
+                    CommandOutput&             output,
+                    MoneyAddOfflineArgs const& args,
+                    ::Command const&) {
+            // --- Permission Check ---
             if (origin.getPermissionsLevel() < CommandPermissionLevel::GameDirectors) {
                 output.error("您没有权限使用此命令。");
                 return;
@@ -472,59 +494,61 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 output.error(fmt::format("未找到玩家 '{}'。", args.playerName));
                 return;
             }
-                const auto& playerInfo = playerInfoOpt.value();
-                std::string uuidStr    = playerInfo.uuid.asString();
-
-                // Add balance with reason
-                std::string                  reason1 = "Command: cmoney add";
-                czmoney::api::MoneyApiResult result =
-                    czmoney::api::addPlayerBalance(uuidStr, currency, amountDouble, reason1); // 调用 API
-                if (result == czmoney::api::MoneyApiResult::Success) {
-                    // Get the new balance to display it
-                    double newBalance =
-                        czmoney::api::getPlayerBalanceOrInit(uuidStr, currency); // Re-fetch or assume success
-                    sendFeedback(
-                        output,
-                        fmt::format(
-                            "成功为玩家 {} 增加了 {} ({}). 新余额: {}",
-                            playerInfo.name,
-                            czmoney::api::formatBalance(static_cast<int64_t>(amountDouble * 100.0)),
-                            currency,
-                            czmoney::api::formatBalance(static_cast<int64_t>(newBalance * 100.0))
-                        ),
-                        true
-                    ); // Corrected: Use API for formatBalance
-                } else {
-                    std::string errorMessage;
-                    switch (result) {
-                    case czmoney::api::MoneyApiResult::InvalidAmount:
-                        errorMessage = "无效金额。";
-                        break;
-                    case czmoney::api::MoneyApiResult::DatabaseError:
-                        errorMessage = "数据库操作失败。";
-                        break;
-                    case czmoney::api::MoneyApiResult::MoneyManagerNotAvailable:
-                        errorMessage = "经济系统不可用。";
-                        break;
-                    case czmoney::api::MoneyApiResult::AccountNotFound:
-                    case czmoney::api::MoneyApiResult::InsufficientBalance:
-                    case czmoney::api::MoneyApiResult::UnknownError:
-                    default:
-                        errorMessage = "未知错误。";
-                        break;
-                    }
-                    sendFeedback(
-                        output,
-                        fmt::format(
-                            "为玩家 {} 增加余额失败：{}。请查看日志获取详细信息。",
-                            playerInfo.name,
-                            errorMessage
-                        ),
-                        false
-                    );
+            const auto& playerInfo = playerInfoOpt.value();
+            std::string uuidStr    = playerInfo.uuid.asString();
+            std::string reason2    = "Console"; // 默认理由为控制台
+            if (origin.getOriginType() == CommandOriginType::Player) {
+                Actor* actor = origin.getEntity();
+                if (actor && actor->isPlayer()) {
+                    Player* playerOrigin = static_cast<Player*>(actor);
+                    reason2              = playerOrigin->getRealName(); // 如果是玩家，则获取玩家名称
                 }
             }
-        );
+            // Add balance with reason
+            std::string                  reason1 = "Command: cmoney add";
+            czmoney::api::MoneyApiResult result =
+                czmoney::api::addPlayerBalance(uuidStr, currency, amountDouble, reason1, reason2); // 调用 API
+            if (result == czmoney::api::MoneyApiResult::Success) {
+                // Get the new balance to display it
+                double newBalance =
+                    czmoney::api::getPlayerBalanceOrInit(uuidStr, currency); // Re-fetch or assume success
+                sendFeedback(
+                    output,
+                    fmt::format(
+                        "成功为玩家 {} 增加了 {} ({}). 新余额: {}",
+                        playerInfo.name,
+                        czmoney::api::formatBalance(static_cast<int64_t>(amountDouble * 100.0)),
+                        currency,
+                        czmoney::api::formatBalance(static_cast<int64_t>(newBalance * 100.0))
+                    ),
+                    true
+                ); // Corrected: Use API for formatBalance
+            } else {
+                std::string errorMessage;
+                switch (result) {
+                case czmoney::api::MoneyApiResult::InvalidAmount:
+                    errorMessage = "无效金额。";
+                    break;
+                case czmoney::api::MoneyApiResult::DatabaseError:
+                    errorMessage = "数据库操作失败。";
+                    break;
+                case czmoney::api::MoneyApiResult::MoneyManagerNotAvailable:
+                    errorMessage = "经济系统不可用。";
+                    break;
+                case czmoney::api::MoneyApiResult::AccountNotFound:
+                case czmoney::api::MoneyApiResult::InsufficientBalance:
+                case czmoney::api::MoneyApiResult::UnknownError:
+                default:
+                    errorMessage = "未知错误。";
+                    break;
+                }
+                sendFeedback(
+                    output,
+                    fmt::format("为玩家 {} 增加余额失败：{}。请查看日志获取详细信息。", playerInfo.name, errorMessage),
+                    false
+                );
+            }
+        });
 
     // 4. money reduce <target> <amount> [currencyType] - 减少在线玩家余额
     moneyCommand.overload<MoneyReduceSelectorArgs>()
@@ -552,6 +576,16 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 return;
             }
 
+            // 获取命令执行者的名称作为理由
+            std::string reason2 = "Console"; // 默认理由为控制台
+            if (origin.getOriginType() == CommandOriginType::Player) {
+                Actor* actor = origin.getEntity();
+                if (actor && actor->isPlayer()) {
+                    Player* playerOrigin = static_cast<Player*>(actor);
+                    reason2              = playerOrigin->getRealName(); // 如果是玩家，则获取玩家名称
+                }
+            }
+
             int successCount = 0;
             int failCount    = 0;
             for (Player* player : results) {
@@ -563,7 +597,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 // 添加理由
                 std::string                  reason1 = "Command: cmoney reduce";
                 czmoney::api::MoneyApiResult result =
-                    czmoney::api::subtractPlayerBalance(uuidStr, currency, amountDouble, reason1); // 调用 API
+                    czmoney::api::subtractPlayerBalance(uuidStr, currency, amountDouble, reason1, reason2); // 调用 API
                 if (result == czmoney::api::MoneyApiResult::Success) {
                     successCount++;
                 } else {
@@ -647,11 +681,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
             // 先检查账户是否存在和余额是否足够，提供更明确的错误信息
             std::optional<double> currentBalanceOpt = czmoney::api::getPlayerBalance(uuidStr, currency);
             if (!currentBalanceOpt.has_value()) {
-                sendFeedback(
-                    output,
-                    fmt::format("为玩家 {} 减少余额失败：账户不存在。", playerInfo.name),
-                    false
-                );
+                sendFeedback(output, fmt::format("为玩家 {} 减少余额失败：账户不存在。", playerInfo.name), false);
                 return;
             }
             if (currentBalanceOpt.value() < amountDouble) { // 直接比较 double
@@ -666,11 +696,19 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 );
                 return;
             }
-
+            // 获取命令执行者的名称作为理由
+            std::string reason2 = "Console"; // 默认理由为控制台
+            if (origin.getOriginType() == CommandOriginType::Player) {
+                Actor* actor = origin.getEntity();
+                if (actor && actor->isPlayer()) {
+                    Player* playerOrigin = static_cast<Player*>(actor);
+                    reason2              = playerOrigin->getRealName(); // 如果是玩家，则获取玩家名称
+                }
+            }
             // 尝试扣款
             std::string                  reason1 = "Command: cmoney reduce";
             czmoney::api::MoneyApiResult result =
-                czmoney::api::subtractPlayerBalance(uuidStr, currency, amountDouble, reason1); // 调用 API
+                czmoney::api::subtractPlayerBalance(uuidStr, currency, amountDouble, reason1, reason2); // 调用 API
             if (result == czmoney::api::MoneyApiResult::Success) {
                 double newBalance = currentBalanceOpt.value() - amountDouble; // 直接计算新余额
                 sendFeedback(
@@ -709,11 +747,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 }
                 sendFeedback(
                     output,
-                    fmt::format(
-                        "为玩家 {} 减少余额失败：{}。请查看日志获取详细信息。",
-                        playerInfo.name,
-                        errorMessage
-                    ),
+                    fmt::format("为玩家 {} 减少余额失败：{}。请查看日志获取详细信息。", playerInfo.name, errorMessage),
                     false
                 );
             }
@@ -809,7 +843,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                         // 格式化输出，包含变动前、变动量、变动后和原因
                         output.success(fmt::format(
                             "[{}] {} -> {} ({}), 原因: {}", // 移除了第四个占位符的 :+
-                            entry.timestamp.substr(0, 19),    // 截取 YYYY-MM-DD HH:MM:SS
+                            entry.timestamp.substr(0, 19),  // 截取 YYYY-MM-DD HH:MM:SS
                             czmoney::api::formatBalance(previousAmountCents),
                             czmoney::api::formatBalance(newAmountCents),
                             czmoney::api::formatBalance(changeAmountCents), // formatBalance 已处理符号
@@ -830,16 +864,16 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
         .overload() // 无参数重载
         .text("pay")
         .execute([&logger](CommandOrigin const& origin, CommandOutput& output) { // 显式捕获 logger
-                // --- 检查命令来源是否为玩家 ---
-                if (origin.getOriginType() != CommandOriginType::Player) {
-                    output.error("此命令只能由玩家执行。");
-                    return;
-                }
-                Actor* actor = origin.getEntity();
-                if (!actor || !actor->isPlayer()) {
-                    output.error("无法从命令源获取玩家实体。");
-                    return;
-                }
+            // --- 检查命令来源是否为玩家 ---
+            if (origin.getOriginType() != CommandOriginType::Player) {
+                output.error("此命令只能由玩家执行。");
+                return;
+            }
+            Actor* actor = origin.getEntity();
+            if (!actor || !actor->isPlayer()) {
+                output.error("无法从命令源获取玩家实体。");
+                return;
+            }
             Player* player = static_cast<Player*>(actor);
             // --- 来源检查结束 ---
 
@@ -861,6 +895,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
             }
 
             try {
+
                 czmoney::ui::showTransferForm(
                     *player,
                     "",
@@ -918,13 +953,13 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 }
                 if (results.size() > 1) {
                     output.error("无法同时向多个玩家转账。请指定单个收款人。");
-                     return;
-                 }
-                 // 使用迭代器访问结果
-                 Player* receiverPlayer = *results.begin();
-                 if (!receiverPlayer) {
-                      output.error("选择了无效的收款玩家。");
-                     return;
+                    return;
+                }
+                // 使用迭代器访问结果
+                Player* receiverPlayer = *results.begin();
+                if (!receiverPlayer) {
+                    output.error("选择了无效的收款玩家。");
+                    return;
                 }
                 std::string receiverUuid = receiverPlayer->getUuid().asString();
                 std::string receiverName = receiverPlayer->getRealName(); // 获取接收者名称
@@ -1053,7 +1088,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                     return;
                 }
                 Actor* senderActor = origin.getEntity();
-                 if (!senderActor || !senderActor->isPlayer()) {
+                if (!senderActor || !senderActor->isPlayer()) {
                     output.error("无法获取发送者玩家实体。");
                     return;
                 }
@@ -1086,7 +1121,7 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 std::string receiverUuid = receiverInfo.uuid.asString();
                 std::string receiverName = receiverInfo.name; // 使用 PlayerInfo 中的名字
 
-                 // --- 防止自己给自己转账 ---
+                // --- 防止自己给自己转账 ---
                 if (senderUuid == receiverUuid) {
                     output.error("您不能给自己转账。");
                     return;
@@ -1177,16 +1212,16 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
         .text("rank")
         .optional("currencyType") // 可选货币类型
         .execute([](CommandOrigin const& origin, CommandOutput& output, MoneyRankArgs const& args, ::Command const&) {
-                // --- 检查命令来源是否为玩家 ---
-                if (origin.getOriginType() != CommandOriginType::Player) {
-                    output.error("此命令只能由玩家执行。");
-                    return;
-                }
-                Actor* actor = origin.getEntity();
-                if (!actor || !actor->isPlayer()) {
-                    output.error("无法从命令源获取玩家实体。");
-                    return;
-                }
+            // --- 检查命令来源是否为玩家 ---
+            if (origin.getOriginType() != CommandOriginType::Player) {
+                output.error("此命令只能由玩家执行。");
+                return;
+            }
+            Actor* actor = origin.getEntity();
+            if (!actor || !actor->isPlayer()) {
+                output.error("无法从命令源获取玩家实体。");
+                return;
+            }
             Player* player = static_cast<Player*>(actor);
             // --- 来源检查结束 ---
 

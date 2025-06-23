@@ -9,7 +9,7 @@
 #include <RemoteCallAPI.h>
 #include <filesystem>
 #include <stdexcept>
-
+#include "event/EventTest.h"
 namespace czmoney {
 
 
@@ -59,7 +59,6 @@ bool MyMod::enable() {
         try {
         const auto& cfg = getConfig();
         logger.info("Selected database type: {}", cfg.db_type);
-
         if (cfg.db_type == "mysql") {
             logger.info("Using MySQL database: host={}, user={}, db={}, port={}",
                         cfg.db_host, cfg.db_user, cfg.db_name, cfg.db_port);
@@ -110,6 +109,7 @@ bool MyMod::enable() {
                 // --- 初始化玩家经济监听器 ---
                 logger.info("Initializing player money event listener...");
                 czmoney::initMoney(); // 调用 initMoney 函数来注册事件监听器
+                czmoney::test::registerMoneyEventListeners(); // 注册 EventTest 中的事件监听器
                 logger.info("Player money event listener initialized.");
 
                 // --- 注册命令 ---
