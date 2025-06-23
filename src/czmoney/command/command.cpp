@@ -4,6 +4,7 @@
 #include "czmoney/money/money.h" // 仍然需要 MoneyManager::formatBalance 的声明，因为 convertCommandFloatToInt64 内部使用了它，但会改为 API 调用
 #include "czmoney/money/money_api.h" // 包含 TransactionLogEntry 和 API 函数
 #include "czmoney/ui/Transfer.h"     // 包含 TransferForm
+#include "czmoney/ui/AdminMoneyListForm.h" // 包含 AdminMoneyListForm
 #include "ll/api/command/CommandHandle.h"
 #include "ll/api/command/CommandRegistrar.h"
 #include "ll/api/command/EnumName.h"
@@ -1235,6 +1236,34 @@ void registerMoneyCommands(const std::vector<std::string>& aliases) {
                 output.success("正在打开排行榜表单...");
             } catch (const std::exception& e) {
                 output.error(fmt::format("打开排行榜表单失败：{}", e.what()));
+            }
+        });
+
+    // 9. money admin (无参数) - 打开经济管理表单
+    moneyCommand
+        .overload() // 无参数重载
+        .text("admin")
+        .execute([&logger](CommandOrigin const& origin, CommandOutput& output) {
+            if (origin.getPermissionsLevel() < CommandPermissionLevel::GameDirectors) {
+                output.error("您没有权限使用此命令。");
+                return;
+            }
+            if (origin.getOriginType() != CommandOriginType::Player) {
+                output.error("此命令只能由玩家执行。");
+                return;
+            }
+            Actor* actor = origin.getEntity();
+            if (!actor || !actor->isPlayer()) {
+                output.error("无法从命令源获取玩家实体。");
+                return;
+            }
+            Player* player = static_cast<Player*>(actor);
+
+            try {
+                czmoney::ui::showAdminMoneyListForm(*player);
+                output.success("正在打开经济管理表单...");
+            } catch (const std::exception& e) {
+                output.error(fmt::format("打开经济管理表单失败：{}", e.what()));
             }
         });
 
