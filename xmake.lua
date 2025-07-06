@@ -6,14 +6,15 @@ add_repositories("liteldev-repo https://github.com/LiteLDev/xmake-repo.git")
 -- add_requires("levilamina develop") to use develop version
 -- please note that you should add bdslibrary yourself if using dev version
 if is_config("target_type", "server") then
-    add_requires("levilamina", {configs = {target_type = "server"}})
+    add_requires("levilamina 1.3.3", {configs = {target_type = "server"}})
 else
     add_requires("levilamina", {configs = {target_type = "client"}})
 end
 add_requires("sqlitecpp")
-add_requires("mysql")
 add_requires("levibuildscript")
 add_requires("legacyremotecall")
+add_requires("mysql")
+add_requires("postgresql")
 if not has_config("vs_runtime") then
     set_runtimes("MD")
 end
@@ -30,7 +31,7 @@ target("czmoney") -- Change this to your mod name.
     add_cxflags( "/EHa", "/utf-8", "/W4", "/w44265", "/w44289", "/w44296", "/w45263", "/w44738", "/w45204")
     add_defines("NOMINMAX", "UNICODE")
     add_defines("CZMONEY_API_EXPORTS") 
-    add_packages("levilamina","sqlitecpp","mysql")
+    add_packages("levilamina","sqlitecpp","mysql","postgresql")
     add_packages("legacyremotecall")
     set_kind("shared")
     set_languages("c++20")
